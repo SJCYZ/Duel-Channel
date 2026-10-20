@@ -29,7 +29,7 @@
 
 ## 实施任务
 
-### 任务 1：新增可单测的客户端地址解析器
+### Task 1: 新增可单测的客户端地址解析器
 
 **文件：** 新增 `server/client-ip.mjs`、`test/client-ip.test.mjs`。
 
@@ -41,7 +41,7 @@
 4. 再运行 `node --test test/client-ip.test.mjs`，确认全部通过。
 5. 执行 `git diff --check` 并提交：`feat: add validated client IP resolver`。
 
-### 任务 2：让网关共用解析结果并收紧 `/status`
+### Task 2: 让网关共用解析结果并收紧 `/status`
 
 **文件：** 修改 `server/gateway.mjs`、`test/gateway.test.mjs`、`test/limits.test.mjs`。
 
@@ -53,7 +53,7 @@
 4. 运行 `node --test test/client-ip.test.mjs test/limits.test.mjs test/gateway.test.mjs`，确认新旧相关用例通过。
 5. 执行 `git diff --check` 并提交：`fix: enforce trusted proxy identity at public gateway`。
 
-### 任务 3：更新公网自托管部署说明
+### Task 3: 更新公网自托管部署说明
 
 **文件：** 修改 `docs/DEPLOY.md`、`SECURITY.md`。
 
