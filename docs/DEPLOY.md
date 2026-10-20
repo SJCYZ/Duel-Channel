@@ -49,8 +49,10 @@ x64 和 arm64 都可以：64 位 ARM 的 Linux（树莓派 4 / 5 的 64 位系�
 ### Linux 服务器（无桌面）
 
 ```bash
-./start.sh --lan --no-open
+./start.sh --local --no-open
 ```
+
+此方式默认只监听本机，适合与同机反向代理配合。若反向代理位于另一台设备，应将网关绑定到专用私网接口，并通过防火墙限制为该私网可达；不要开放公网入口。
 
 常驻运行可以用 systemd。下面假设仓库在 `/opt/duel-channel`，并且已经用 `./start.sh` 构建过一次页面：
 
@@ -62,7 +64,8 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/duel-channel
-ExecStart=/usr/bin/node server/launch.mjs --instances 3 --host 0.0.0.0
+ExecStart=/usr/bin/node server/launch.mjs --instances 3
+Environment=TRUST_PROXY=1
 Restart=on-failure
 User=duel
 
@@ -75,7 +78,7 @@ sudo systemctl enable --now duel-channel
 journalctl -u duel-channel -f        # 查看日志
 ```
 
-服务器自身不提供 HTTPS，公开架设时请放在反向代理之后，并设置 `TRUST_PROXY=1`，让匹配按玩家的真实地址分桌（见下面的「公平性」）；同时请遵守非商业的使用限制（[NOTICE.md](../NOTICE.md)）。
+服务器自身不提供 HTTPS。公开架设时必须放在 HTTPS 反向代理之后，并将网关端口限制为本机或私网可达；不要让网关端口直接接受公网连接。只有当网关看到的 TCP 对端是 loopback 或私网地址时，`TRUST_PROXY=1` 才会采用经过 IP 校验的 `X-Forwarded-For` 最右侧地址。反向代理必须覆盖入站的 `X-Forwarded-For`，写入它实际观察到的客户端地址，并屏蔽公网对 `/status` 的访问。公网监控应转发 `/healthz`；详细状态仅从服务器本机查询。配置示例见「状态与健康检查」。另请遵守非商业的使用限制（[NOTICE.md](../NOTICE.md)）。
 
 ### 页面怎样加载
 
@@ -111,7 +114,7 @@ node server/launch.mjs --host 0.0.0.0       # 网关监听所有网卡（局域�
 | `PORT` / `HOST` | 8600 / 127.0.0.1 | 单独启动网关或实例时的端口与地址（`launch.mjs` 会自动设置） |
 | `INSTANCES` | 8611,8612,8613 | 网关使用的实例端口（逗号分隔） |
 | `QUEUE_FILL_MS` | 10000 | 匹配队列等待多久后由 NPC 补位 |
-| `TRUST_PROXY` | 关 | 设为 `1` 时按 `X-Forwarded-For` 的第一跳认定玩家地址（只在反向代理之后开启，否则玩家可以伪造） |
+| `TRUST_PROXY` | 关 | 设为 `1` 时，仅当 TCP 对端为 loopback 或私网地址时，采用通过 IP 校验的 `X-Forwarded-For` 最右侧地址；代理必须覆盖入站 XFF 并写入实际观察到的客户端地址 |
 | `QUEUE_SAME_IP` | 关 | 设为 `1` 时允许同一地址的玩家坐同一桌（局域网活动、同一 NAT 后面的多台电脑） |
 | `MAX_SESSIONS_PER_IP` | 16 | 同一网络的大厅连接数上限（断线后保留的 45 秒也算），超过时连接被拒绝（HTTP 429） |
 | `MAX_ROOMS_PER_IP` / `MAX_ROOMS` | 2 / 200 | 同一网络 / 全服同时存在的群组房间数上限 |
@@ -126,8 +129,8 @@ node server/launch.mjs --host 0.0.0.0       # 网关监听所有网卡（局域�
 
 - 每轮的战斗种子在押注结束后才发给页面，开局时只给出它的承诺（`sha256(种子:盐)`），页面会核对；押注的最后 7 秒是暗选，这时的选择不公开；知道结果的 NPC 只在暗选时段选择。规则见 [MECHANICS.md](MECHANICS.md)「押注与结算」。
 - 公开匹配（礼物对决、竞猜对决的匹配队列）：同一个浏览器同时只能占一个座位（排队中或比赛还在进行时不能再排队）；同一地址的玩家会被分到不同的桌（`QUEUE_SAME_IP=1` 可以关掉）。群组房间由房主邀请，不受这两条限制。
-- 限流：大厅和对局连接的消息都有速率上限，持续刷消息的连接会被断开；同一地址每分钟最多输错 10 次房间邀请码。`/status` 只对本机请求显示房间邀请码。
-- 防滥用（防止有人开一堆房间或比赛占满服务器）：按网络计数——IPv4 按地址、IPv6 按 /64 前缀（一个家庭或用户通常拥有整个 /64）——限制大厅连接数、同时存在的房间数、每分钟建房次数和进行中的比赛数，全服也有房间和比赛的总数上限，数值见上面的参数表（设为 `0` 表示不限）。勾选 NPC 补位的房间一个人就能开局，每场比赛都要在对战实例上模拟十轮，所以比赛数是最要紧的一条；1 核的小服务器建议把 `MAX_MATCHES` 调到 20～30。来自本机的连接（没有可知地址：本机游玩、没开 `TRUST_PROXY` 的隧道、测试用的机器人）不受这些限制；公开架设时请开 `TRUST_PROXY=1`，否则所有玩家都显示为本机，限制就不起作用。被拒绝的情况每个网络每分钟记一行日志（`limit: …`），`/status` 的 `gateway.limits` 显示当前上限，`gateway.playing` 是正在进行的比赛数。
+- 限流：大厅和对局连接的消息都有速率上限，持续刷消息的连接会被断开；同一地址每分钟最多输错 10 次房间邀请码。`/status` 仅允许 loopback 客户端读取，且只对本机请求显示房间邀请码。公网反向代理必须屏蔽 `/status`；代理对外提供 `/healthz` 作为精简健康检查，详细状态只能从服务器本机直接查询。
+- 防滥用（防止有人开一堆房间或比赛占满服务器）：按网络计数——IPv4 按地址、IPv6 按 /64 前缀（一个家庭或用户通常拥有整个 /64）——限制大厅连接数、同时存在的房间数、每分钟建房次数和进行中的比赛数，全服也有房间和比赛的总数上限，数值见上面的参数表（设为 `0` 表示不限）。勾选 NPC 补位的房间一个人就能开局，每场比赛都要在对战实例上模拟十轮，所以比赛数是最要紧的一条；1 核的小服务器建议把 `MAX_MATCHES` 调到 20～30。未启用可信代理或代理地址不受信时，连接按 TCP 对端地址计数；公开架设须启用 `TRUST_PROXY=1`，并确保网关前的代理从本机或私网连接且覆盖传入 XFF，否则所有玩家可能按代理地址计数，限流无法按玩家地址区分。被拒绝的情况每个网络每分钟记一行日志（`limit: …`），`/status` 的 `gateway.limits` 显示当前上限，`gateway.playing` 是正在进行的比赛数；该详细页面仅从服务器本机直接查询。
 - 机器人（`bots.mjs`）和 NPC 补位不受这些限制影响。
 
 ### 录制用的调试模式
@@ -144,8 +147,32 @@ npm start -- --debug            # 或 DUEL_DEBUG=1 npm start
 
 ### 状态与健康检查
 
-- <http://127.0.0.1:8600/status>：实例负载、进行中的比赛、匹配队列、房间、最近的服务端错误（`errors`）和收到的错误报告数（`reports`）。
-- <http://127.0.0.1:8600/healthz>：`{"ok":true,"instances":N,"page":true}`，供容器与监控使用。页面尚未构建时首页返回 503 并给出提示。
+- <http://127.0.0.1:8600/status>：实例负载、进行中的比赛、匹配队列、房间、最近的服务端错误（`errors`）和收到的错误报告数（`reports`）。仅 loopback 客户端可读取；其他客户端收到空 `404`。公网反向代理必须屏蔽此路径，详细状态仅从服务器本机直接查询。
+- <http://127.0.0.1:8600/healthz>：`{"ok":true,"instances":N,"page":true}`，供容器与监控使用，反向代理应转发此路径。页面尚未构建时首页返回 503 并给出提示。
+
+同机 Nginx 示例（替换域名和证书路径）。`/status` 在代理处拒绝，其他请求（包括 `/healthz`）转发到仅本机监听的网关；设置头会覆盖客户端传入的同名 XFF：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name play.example.org;
+
+    # ssl_certificate 和 ssl_certificate_key 按部署环境配置
+
+    location ^~ /status {
+        return 404;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8600;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header X-Forwarded-For $remote_addr;
+    }
+}
+```
 
 ### 日志、错误与自动重启
 
@@ -161,14 +188,14 @@ npm start -- --debug            # 或 DUEL_DEBUG=1 npm start
 
 ## 4. 和朋友一起玩（局域网）
 
-1. 开服的电脑：运行一键开服脚本并选 `y`（或 `./start.sh --lan`、`start.cmd --lan`；手动方式是 `node server/launch.mjs --host 0.0.0.0`）。
+1. 开服的电脑：运行一键开服脚本并选 `y`（或 `./start.sh --lan`、`start.cmd --lan`；手动方式是 `node server/launch.mjs --host 0.0.0.0`）。这仅适用于可信局域网或虚拟局域网，网关端口必须限制为该私网可达，不能开放公网入口。
 2. 防火墙放行 TCP **8600**（对局连接也走这个端口）：
    - Windows：首次启动时会询问是否允许 Node.js 访问网络，勾选「专用网络」。
    - Linux：`sudo ufw allow 8600/tcp`，或 `sudo firewall-cmd --add-port=8600/tcp`。
 3. 其他人用浏览器打开脚本打印的地址 `http://<开服电脑的 IP>:8600/`。
 4. 一人「创建群组」得到邀请码，其他人「加入群组」输入邀请码；或者都点「加入赛事」进入匹配队列。
 
-不在同一个局域网时，可以用虚拟局域网工具（例如 Tailscale、ZeroTier、Radmin VPN）把设备组到同一个网络里，再连接虚拟网卡的 IP（脚本会列出来）。**不要**把服务器直接暴露到公网：页面内嵌游戏素材，公开提供属于再分发（见 [NOTICE.md](../NOTICE.md)）。
+不在同一个局域网时，可以用虚拟局域网工具（例如 Tailscale、ZeroTier、Radmin VPN）把设备组到同一个网络里，再连接虚拟网卡的 IP（脚本会列出来）。**不要**把服务器直接暴露到公网：页面内嵌游戏素材，公开提供属于再分发（见 [NOTICE.md](../NOTICE.md)）。公开部署时应使用上文的 HTTPS 反向代理配置，并只让代理所在的本机或私网访问网关端口。
 
 ## 5. Docker
 
