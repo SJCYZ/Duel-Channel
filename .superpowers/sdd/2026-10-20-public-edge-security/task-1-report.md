@@ -20,3 +20,17 @@
 ## 提交
 
 提交信息：`feat: add validated client IP resolver`
+
+## Fix round 1：展开 mapped IPv6 点分尾部
+
+### 变化
+
+修正 IPv4-mapped IPv6 识别正则，使其同时接受压缩前缀 `::ffff:` 和完整展开前缀 `0:0:0:0:0:ffff:`，尾部为点分 IPv4 的形式。规范化后映射地址成为 IPv4，因此映射到 `127.0.0.1` 时 loopback 判定也走 IPv4 `127.0.0.0/8` 范围。
+
+在 `test/client-ip.test.mjs` 增加完整展开点分尾部的规范化断言，以及完整展开 mapped loopback 判定断言。
+
+### 验证记录
+
+- RED：先添加回归断言，再运行 `node --test test/client-ip.test.mjs`。输出为 `tests 7`、`pass 6`、`fail 1`；`normalizes IPv4-mapped IPv6 addresses` 失败，实际值为 `0:0:0:0:0:ffff:192.0.2.7`，预期为 `192.0.2.7`。
+- GREEN：修正后再次运行 `node --test test/client-ip.test.mjs`，输出为 `tests 7`、`pass 7`、`fail 0`。
+- `git diff --check`：通过。

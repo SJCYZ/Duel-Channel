@@ -22,7 +22,7 @@ function normalizeIp(ip) {
   if (!family) return null;
   if (family === 4) return ip;
 
-  const mapped = ip.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
+  const mapped = ip.match(/^(?:::|0:0:0:0:0:)ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
   if (mapped && isIP(mapped[1]) === 4) return mapped[1];
 
   const mappedHex = ip.match(/^(?:::|0:0:0:0:0:)ffff:([\da-f]{1,4}):([\da-f]{1,4})$/i);
