@@ -76,6 +76,22 @@ test('the served page: encodings, validators, the immutable pack, only the build
   try { assert.equal((await get(gw3.port, '/')).status, 503); } finally { gw3.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('public edge: /status is loopback-only with TRUST_PROXY while /healthz stays public', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'duel-pub-'));
+  const gw = await gateway(dir, join(dir, 'logs'), { TRUST_PROXY: '1' });
+  try {
+    const remote = await get(gw.port, '/status', { 'X-Forwarded-For': '203.0.113.8' });
+    assert.equal(remote.status, 404);
+    assert.equal(remote.body.length, 0);
+    const local = await get(gw.port, '/status');
+    assert.equal(local.status, 200);
+    assert.ok(JSON.parse(local.body).gateway);
+    const health = await get(gw.port, '/healthz', { 'X-Forwarded-For': '203.0.113.8' });
+    assert.equal(health.status, 200);
+    assert.deepEqual(Object.keys(JSON.parse(health.body)).sort(), ['instances', 'ok', 'page']);
+  } finally { gw.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('the lobby: a dropped viewer keeps their room seat and takes the session back with its key', { timeout: 30000 }, async () => {
   const { default: WebSocket } = await import('ws');
   const dir = mkdtempSync(join(tmpdir(), 'duel-pub-'));
@@ -183,6 +199,23 @@ test('error reports: saved one file each under logs/reports, refused when empty,
     const st = JSON.parse((await get(gw.port, '/status')).body);
     assert.equal(st.gateway.reports, 5);
     assert.ok(Array.isArray(st.gateway.errors));
+  } finally { gw.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('error report limits use the parsed client address and rightmost forwarded address', { timeout: 30000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'duel-pub-')), logs = join(dir, 'logs');
+  const gw = await gateway(dir, logs, { TRUST_PROXY: '1' });
+  const post = (xff) => new Promise((res, rej) => {
+    const data = Buffer.from(JSON.stringify({ text: 'report' }));
+    const r = request({ host: '127.0.0.1', port: gw.port, path: '/report', method: 'POST', agent: false,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length, 'X-Forwarded-For': xff } },
+    (m) => { m.resume(); m.on('end', () => res(m.statusCode)); });
+    r.on('error', rej); r.end(data);
+  });
+  try {
+    for (let i = 0; i < 5; i++) assert.equal(await post(`198.51.100.${i + 1}, 203.0.113.7`), 200);
+    assert.equal(await post('198.51.100.99, 203.0.113.7'), 429, 'left XFF entries must not split one address limit');
+    assert.equal(await post('198.51.100.1, 203.0.113.8'), 200, 'a different parsed client gets a separate limit');
   } finally { gw.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
 

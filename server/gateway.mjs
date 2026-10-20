@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { SIM } from './game.mjs';
 import { installCrashLog, recordError, recentErrors, saveReport, reportCount } from './errors.mjs';
+import { resolveClientIp, isLoopbackIp } from './client-ip.mjs';
 
 const PORT = Number(process.env.PORT || 8600), HOST = process.env.HOST || '127.0.0.1';
 const INSTANCES = (process.env.INSTANCES || '8611,8612,8613').split(',').map(Number);
@@ -59,13 +60,10 @@ const NODE = nodeOf(process.env);
 // a code of another listed node: that node's host; null for this node's own codes, unknown digits, or no node
 const elsewhere = (code) => (NODE && /^\d{6}$/.test(code) && code[0] !== String(NODE.digit) && NODE.peers[code[0]]) || null;
 const newCode = () => (NODE ? `${NODE.digit}${String(Math.floor(Math.random() * 1e5)).padStart(5, '0')}` : String(100000 + Math.floor(Math.random() * 900000)));
-// a connection's address for the queues: the socket's, or behind a trusted proxy the first X-Forwarded-For hop; this
-// machine's own (a tunnel or proxy here that does not pass the client's) counts as unknown
-const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+// The local machine (or an untrusted proxy address) has no network limit identity.
 function clientIp(req) {
-  let ip = req.socket.remoteAddress || '';
-  if (TRUST_PROXY) { const f = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim(); if (f) ip = f; }
-  return !ip || LOOPBACK.has(ip) ? null : ip.replace(/^::ffff:/, '');
+  const ip = resolveClientIp(req, TRUST_PROXY);
+  return isLoopbackIp(ip) ? null : ip;
 }
 // ---- abuse limits ---------------------------------------------------------------------------------------------------
 // Rooms and matches cost the server: a room started with NPC seats is a match on its own, and a match is simulated on an
@@ -349,7 +347,7 @@ function sendFile(req, res, path, type, cache) {
 // at most 64 kB, 5 a minute and 30 an hour from one address
 const REPORT_MAX = 64 * 1024, reportsBy = new Map();
 function takeReport(req, res) {
-  const from = req.socket.remoteAddress || '?', now = Date.now();
+  const from = clientIp(req) || req.socket.remoteAddress || '?', now = Date.now();
   const times = (reportsBy.get(from) || []).filter((t) => now - t < 3600e3);
   if (times.filter((t) => now - t < 60e3).length >= 5 || times.length >= 30) { res.writeHead(429, { 'Content-Type': 'application/json' }); res.end('{"error":"too many reports"}'); return; }
   let body = '', over = false;
@@ -400,10 +398,11 @@ const server = http.createServer((req, res) => {
   // a liveness probe for containers and CI: the gateway answers, and how many instances it can reach
   if (u.pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, instances: [...inst.values()].filter((i) => i.up).length, page: hasPage() })); return; }
   if (u.pathname === '/status') {
+    if (!isLoopbackIp(resolveClientIp(req, TRUST_PROXY))) { res.writeHead(404); res.end(); return; }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ gateway: { port: PORT, pid: process.pid, sessions: sessions.size, relays, limits: LIMIT, playing: playing.size, queues: Object.fromEntries(QUEUE_MODES.map((m) => [m, queues[m].map((s) => s.name)])), errors: recentErrors(), reports: reportCount() },
       // a room's code only for this machine: anyone else could walk into a private room with it
-      rooms: [...rooms.values()].map((r) => ({ ...(LOOPBACK.has(req.socket.remoteAddress) ? { code: r.code } : {}), mode: r.mode, host: r.host.name, members: r.members.map((m) => m.name), npc: r.npc })),
+      rooms: [...rooms.values()].map((r) => ({ ...(isLoopbackIp(req.socket.remoteAddress) ? { code: r.code } : {}), mode: r.mode, host: r.host.name, members: r.members.map((m) => m.name), npc: r.npc })),
       instances: [...inst.values()].map((i) => ({ port: i.port, up: i.up, matches: i.matches, players: i.players, list: i.list })) }, null, 1));
     return;
   }

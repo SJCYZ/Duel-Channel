@@ -56,6 +56,16 @@ test('lobby connections: one network over its limit is refused before the handsh
   } finally { s.stop(); }
 });
 
+test('lobby limits use the rightmost forwarded address, regardless of earlier XFF entries', { timeout: 30000 }, async () => {
+  const s = await server({ MAX_SESSIONS_PER_IP: '2' });
+  try {
+    assert.ok((await open(s.port, '198.51.100.1, 203.0.113.9')).ws);
+    assert.ok((await open(s.port, '198.51.100.2, 203.0.113.9')).ws);
+    assert.equal((await open(s.port, '198.51.100.3, 203.0.113.9')).refused, 429);
+    assert.ok((await open(s.port, '198.51.100.3, 203.0.113.10')).ws);
+  } finally { s.stop(); }
+});
+
 test('rooms: per network, per minute and in all', { timeout: 30000 }, async () => {
   const s = await server({ MAX_ROOMS_PER_IP: '1', ROOM_CREATES_PER_MIN: '3', MAX_ROOMS: '2' });
   try {
