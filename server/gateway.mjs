@@ -8,11 +8,9 @@
 // precompressed (brotli / gzip, whichever the browser takes) with validators; the pack, named after its content, may be
 // cached for good. A build from before the split (public/duel-flow.html only) is served as it is. /sim-check is the
 // cross-engine check of the sim (public/sim-check.html from `npm run simcheck`).
-// Fair play in the public queues: a browser (the page's own id, kept in its storage) holds one seat at a time — not a
-// second place in a queue, nor one while its seat in a match is still in play — and viewers from one address are put
-// at different tables (behind a reverse proxy set TRUST_PROXY=1 so the address is the client's, X-Forwarded-For; at a
-// LAN event behind one NAT, QUEUE_SAME_IP=1 lets them share). Rooms are the host's: none of this applies there. Every
-// connection's messages are rate-limited, and so are a room code's failed tries from one address.
+// 公共匹配公平性：浏览器（页面本地保存的 id）同时只能占一个座位（不能同时排队，也不能在比赛座位仍有效时再次排队）；同一地址的观众会被分到不同桌。
+// TRUST_PROXY=1 仅在反向代理 TCP 对端为 loopback 或受信本地网段时生效；网关采用经 IP 校验的 X-Forwarded-For 最右地址；
+// 同一 NAT 的局域网活动可用 QUEUE_SAME_IP=1 允许同桌；群组房间由房主邀请，不受这些限制。连接消息和房间码错误尝试均有限流。
 // One node of several: the same gateway may run on several machines, each with its own rooms and queues. A room's code
 // then begins with the node's digit; a code of another node is answered with that node's host name ({ t: 'elsewhere' }),
 // and the page connects there to join it — a code of another node is no failed try.
