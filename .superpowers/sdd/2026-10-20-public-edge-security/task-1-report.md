@@ -13,6 +13,20 @@
 - 全套：`npm test`，68/68 通过，0 失败。
 - `git diff --check`：通过。
 
+## Fix round 2：补零的展开 mapped IPv6
+
+### 变化
+
+扩展 mapped IPv6 前缀匹配，允许展开形式中零组按合法 IPv6 写法补零（每组 1 至 4 个零）。点分 IPv4 尾部和十六进制尾部都规范化为 IPv4；补零展开且映射到 `127.0.0.1` 的地址也据此按 IPv4 loopback 范围判断。
+
+在 `test/client-ip.test.mjs` 增加补零展开点分尾部、十六进制尾部及 loopback 的回归断言。
+
+### 验证记录
+
+- RED：添加断言后运行 `node --test test/client-ip.test.mjs`。输出为 `tests 7`、`pass 6`、`fail 1`；`normalizes IPv4-mapped IPv6 addresses` 失败，实际值为 `0000:0000:0000:0000:0000:ffff:192.0.2.7`，预期为 `192.0.2.7`。
+- GREEN：修正后再次运行 `node --test test/client-ip.test.mjs`，输出为 `tests 7`、`pass 7`、`fail 0`。
+- `git diff --check`：通过。
+
 ## 范围与疑虑
 
 仅新增解析器、其定向测试和本报告；未改动网关、代理配置或其他任务文件，也未新增依赖。无待解决疑虑。调用方应将明确的布尔 `true` 传给 `trustProxy` 才会启用代理信任。
