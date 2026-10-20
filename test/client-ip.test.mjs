@@ -29,8 +29,10 @@ test('normalizes IPv4-mapped IPv6 addresses', () => {
   assert.equal(resolveClientIp(request('10.0.0.1', '::ffff:c000:0207'), true), '192.0.2.7');
   assert.equal(resolveClientIp(request('0:0:0:0:0:ffff:192.0.2.7'), false), '192.0.2.7');
   assert.equal(resolveClientIp(request('0000:0000:0000:0000:0000:ffff:192.0.2.7'), false), '192.0.2.7');
+  assert.equal(resolveClientIp(request('0:0::ffff:192.0.2.7'), false), '192.0.2.7');
   assert.equal(resolveClientIp(request('0:0:0:0:0:ffff:c000:0207'), false), '192.0.2.7');
   assert.equal(resolveClientIp(request('0000:0000:0000:0000:0000:ffff:c000:0207'), false), '192.0.2.7');
+  assert.equal(resolveClientIp(request('0:0::ffff:7f00:1'), false), '127.0.0.1');
 });
 
 test('returns null for an invalid TCP peer', () => {
@@ -42,6 +44,7 @@ test('recognizes all IPv4 127/8 addresses and IPv6 loopback', () => {
   assert.equal(isLoopbackIp('::1'), true);
   assert.equal(isLoopbackIp('0:0:0:0:0:ffff:127.0.0.1'), true);
   assert.equal(isLoopbackIp('0000:0000:0000:0000:0000:ffff:127.0.0.1'), true);
+  assert.equal(isLoopbackIp(resolveClientIp(request('0:0::ffff:7f00:1'), false)), true);
   assert.equal(isLoopbackIp('10.0.0.1'), false);
   assert.equal(isLoopbackIp('invalid'), false);
 });

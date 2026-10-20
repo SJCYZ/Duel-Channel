@@ -13,6 +13,18 @@
 - 全套：`npm test`，68/68 通过，0 失败。
 - `git diff --check`：通过。
 
+## Fix round 3：结构化识别压缩的 mapped IPv6
+
+### 变化
+
+对已由 `node:net` 的 `isIP` 校验为 IPv6 的地址，使用 Node URL 对 IPv6 literal 做 canonicalization，再识别 canonical `::ffff:hhhh:hhhh` 形式并转换为 IPv4。这样不再依赖 mapped 前缀是否以某个固定文本形式出现，也覆盖 `0:0::ffff:127.0.0.1` 与 `0:0::ffff:7f00:1`。增加上述压缩形式的 mapped 地址与 loopback 回归断言。
+
+### 验证记录
+
+- RED：增加回归断言后运行 `node --test test/client-ip.test.mjs`。输出为 `tests 7`、`pass 6`、`fail 1`；`normalizes IPv4-mapped IPv6 addresses` 失败，实际值为 `0:0::ffff:192.0.2.7`，预期为 `192.0.2.7`。
+- GREEN：修正后再次运行 `node --test test/client-ip.test.mjs`，输出为 `tests 7`、`pass 7`、`fail 0`。
+- `git diff --check`：通过。
+
 ## Fix round 2：补零的展开 mapped IPv6
 
 ### 变化

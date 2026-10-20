@@ -22,10 +22,13 @@ function normalizeIp(ip) {
   if (!family) return null;
   if (family === 4) return ip;
 
-  const mapped = ip.match(/^(?:::|(?:0{1,4}:){5})ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i);
-  if (mapped && isIP(mapped[1]) === 4) return mapped[1];
-
-  const mappedHex = ip.match(/^(?:::|(?:0{1,4}:){5})ffff:([\da-f]{1,4}):([\da-f]{1,4})$/i);
+  let canonical;
+  try {
+    canonical = new URL(`http://[${ip}]/`).hostname.slice(1, -1);
+  } catch {
+    return ip;
+  }
+  const mappedHex = canonical.match(/^::ffff:([\da-f]{1,4}):([\da-f]{1,4})$/i);
   if (mappedHex) {
     const high = Number.parseInt(mappedHex[1], 16);
     const low = Number.parseInt(mappedHex[2], 16);
