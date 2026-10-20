@@ -157,7 +157,9 @@ server {
     listen 443 ssl;
     server_name play.example.org;
 
-    # ssl_certificate 和 ssl_certificate_key 按部署环境配置
+    # 启用前将路径替换为有效证书及私钥文件路径
+    # ssl_certificate /etc/ssl/certs/play.example.org.pem;
+    # ssl_certificate_key /etc/ssl/private/play.example.org.key;
 
     location ^~ /status {
         return 404;
