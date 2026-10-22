@@ -269,6 +269,8 @@ function trimEntry(scr) {
   for (const k of ['group_lower_dec/pause', 'group_lower_dec/streaming', 'group_video/video_tuber']) { const x = n(k); if (x) x.rt.pos[0] -= dx; }
 }
 async function stEntry(ctx) {
+  let inviteCode = NET.on ? new URLSearchParams(location.search).get('room') : null;
+  if (!/^\d{6}$/.test(inviteCode || '')) inviteCode = null;
   phase('入口 · 登录');
   const scr = new Screen('enemy_duel_entry_page', { z: 5 });
   scr.text('name_layout/text_name', me.name);
@@ -300,9 +302,10 @@ async function stEntry(ctx) {
   G.online = false;
   let r;
   for (;;) {
-    r = await whenTapped(scr, { 'btn_join/hotspot': 'join', 'btn_create/hotspot': 'create', ...(NET.on ? { 'btn_search/hotspot': 'search' } : {}) });
+    r = inviteCode ? 'search' : await whenTapped(scr, { 'btn_join/hotspot': 'join', 'btn_create/hotspot': 'create', ...(NET.on ? { 'btn_search/hotspot': 'search' } : {}) });
     if (r !== 'search') break;
-    const code = await searchDialog();
+    const code = inviteCode || await searchDialog();
+    inviteCode = null;
     if (code) { ctx.joinCode = code; G.mode = MODES_ROOM.find((m) => m.type === 'OPERATION') || G.mode; break; }
   }
   if (r === 'search') {
@@ -353,6 +356,12 @@ async function stPrepare(ctx) {
   playLoops(scr);
   const content = scr.one('panel_main/viewport/content');
   const LIST = create ? MODES_ROOM : MODES_MATCH;
+  let capacityControl = null;
+  if (create) {
+    capacityControl = document.createElement('div'); capacityControl.className = 'room-capacity';
+    capacityControl.hidden = true;
+    $('stage').appendChild(capacityControl);
+  }
   const cards = LIST.map((m, i) => {
     const c = instantiate(scr, content, 'mode_card');
     fillCard(scr, c, m);
@@ -367,6 +376,17 @@ async function stPrepare(ctx) {
     if (sel >= 0) setSel(scr, cards[sel], false);
     sel = i; setSel(scr, cards[i], true);
     G.mode = m;
+    if (create) {
+      const sizes = m.type === 'STAND' ? [30, 60, 90] : [8, 16, 24];
+      ctx.capacity = sizes[0];
+      capacityControl.innerHTML = `<span>房间人数上限</span>${sizes.map((n) => `<button type="button" data-capacity="${n}" aria-pressed="${n === ctx.capacity}">${n}</button>`).join('')}`;
+      capacityControl.hidden = false;
+      capacityControl.onclick = (e) => {
+        const button = e.target.closest('button[data-capacity]'); if (!button) return;
+        ctx.capacity = Number(button.dataset.capacity);
+        for (const b of capacityControl.querySelectorAll('button')) b.setAttribute('aria-pressed', String(b === button));
+      };
+    }
     scr.show('group_default_title', false); scr.show('group_default_bg', false); scr.show('group_mode', true);
     scr.show('icon_join', !create); scr.show('icon_create', create);
     scr.show('icon_solo', !m.multi); scr.show('icon_multi', m.multi);
@@ -384,7 +404,8 @@ async function stPrepare(ctx) {
   cards.forEach((c, i) => scr.tap('hotspot', () => choose(i), c));
   scr.tap('root_mode_choose/button_start', () => toast('先在左侧选择一种模式'));
   const r = await whenTapped(scr, { 'root_top/button_back/hotspot': 'back', 'root_mode_start/button_start': 'start' });
-  if (r === 'back') { scr.close(); ctx.prep = null; return 'entry'; }
+  if (r === 'back') { if (capacityControl) capacityControl.remove(); scr.close(); ctx.prep = null; return 'entry'; }
+  if (capacityControl) capacityControl.remove();
   newPlayers();
   G.online = false;
   if (!G.mode.multi) { await scr.play('view', 'trans_choose_mode'); scr.close(); ctx.prep = null; return 'show'; }

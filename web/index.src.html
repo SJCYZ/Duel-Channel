@@ -33,6 +33,18 @@ html { touch-action: manipulation; overscroll-behavior: none; -webkit-tap-highli
 #uispine { display: none; pointer-events: none; }
 #ui { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
 .screen { position: absolute; inset: 0; pointer-events: none; }
+.room-role { position: absolute; inset: 0; z-index: 1000; display: grid; place-items: center; pointer-events: auto; background: rgba(8, 8, 8, .58); font: 500 16px/1.5 var(--cn); color: #efeee6; }
+.room-role[hidden], .room-capacity[hidden] { display: none; }
+.room-role > div { width: min(460px, calc(100% - 32px)); display: grid; gap: 14px; padding: 24px; background: #1b1c1c; box-shadow: inset 0 3px 0 #f6e033; }
+.room-role h2 { margin: 0; font: 900 22px/1.25 var(--cn); }
+.room-role p { margin: 0; color: #b6bab4; }
+.room-role .room-role-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.room-role button, .room-capacity button { padding: 9px 14px; border: 1px solid rgba(255,255,255,.12); border-radius: 4px; color: #efeee6; background: #282a2a; font: 600 14px/1 var(--cn); cursor: pointer; }
+.room-role button:hover, .room-capacity button:hover { background: #333636; }
+.room-role button:disabled { opacity: .45; cursor: not-allowed; }
+.room-role button.main, .room-capacity button[aria-pressed="true"] { color: #161616; background: #f6e033; border-color: #f6e033; }
+.room-capacity { position: absolute; right: 7%; bottom: 9%; z-index: 20; display: flex; align-items: center; gap: 7px; padding: 10px 12px; border-radius: 4px; color: #efeee6; background: rgba(27, 28, 28, .96); font: 600 13px/1.2 var(--cn); pointer-events: auto; }
+.room-capacity span { margin-right: 4px; }
 .n { position: absolute; pointer-events: none; }
 .n.hot { pointer-events: auto; cursor: pointer; }
 .hov { filter: brightness(1.13); }
@@ -241,6 +253,9 @@ canvas.video { position: absolute; inset: 0; width: 100%; height: 100%; }
 <body>
 <div id="frame">
 <div id="stage">
+  <div id="roomRole" class="room-role" hidden role="dialog" aria-modal="true" aria-labelledby="roomRoleTitle">
+    <div><h2 id="roomRoleTitle">加入房间</h2><p id="roomRoleStatus"></p><div class="room-role-actions"><button id="roomRolePlayer" class="main" type="button">参加</button><button id="roomRoleSpectator" type="button">观战</button><button id="roomRoleCancel" type="button">取消</button></div></div>
+  </div>
   <canvas id="arena" width="1280" height="720"></canvas>
   <div id="ui"></div>
   <canvas id="uispine" width="1280" height="720"></canvas>

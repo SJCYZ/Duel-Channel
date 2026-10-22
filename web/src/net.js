@@ -356,6 +356,25 @@ async function stMatchOnline(ctx) {
 
 // ---- 群组 rooms: create, or join with a code; the host switches NPC fill and starts --------------------------------------
 async function stRoomOnline(ctx) {
+  let joinRole = null;
+  if (ctx.joinCode) {
+    const code = ctx.joinCode;
+    for (;;) {
+      NET.lobby.drain('room.info'); NET.lobby.drain('elsewhere'); NET.lobby.drain('error');
+      NET.lobby.send({ t: 'room.lookup', code });
+      const lookup = await NET.lobby.next(['room.info', 'elsewhere', 'error']);
+      if (lookup.t === 'elsewhere') {
+        if (!nodeHost(lookup.host)) { toast('这个房间在另一台服务器上，请从游戏入口页进入后再加入', 4); ctx.joinCode = null; return 'entry'; }
+        try { await moveLobby(lookup.host); } catch (e) { toast('无法连接房间所在的服务器', 3); ctx.joinCode = null; return 'entry'; }
+        continue;
+      }
+      if (lookup.t === 'error') { toast(lookup.msg, 3); ctx.joinCode = null; return 'entry'; }
+      if (lookup.t !== 'room.info') { toast('与大厅的连接已断开', 3); ctx.joinCode = null; return 'entry'; }
+      joinRole = await chooseRoomRole(lookup);
+      if (!joinRole) { ctx.joinCode = null; return 'entry'; }
+      break;
+    }
+  }
   if (ctx.prep) { ctx.prep.close(); ctx.prep = null; }
   const scr = new Screen('enemy_duel_room_state', { z: 8 });
   for (const s of scr.q('ping')) s.active = false;
@@ -364,7 +383,7 @@ async function stRoomOnline(ctx) {
   scr.text('root_desc/text_desc1', G.mode.desc1); scr.text('root_desc/text_desc2', G.mode.desc2);
   watchPing(scr, 'delay_layout/text_delay', null, (t) => `当前延迟  ${t}`);
   NET.lobby.drain('room');
-  if (ctx.joinCode) NET.lobby.send({ t: 'room.join', code: ctx.joinCode }); else NET.lobby.send({ t: 'room.create', mode: G.mode.id });
+  if (ctx.joinCode) NET.lobby.send({ t: 'room.join', code: ctx.joinCode, role: joinRole }); else NET.lobby.send({ t: 'room.create', mode: G.mode.id, capacity: ctx.capacity });
   let joined = !!ctx.joinCode;
   ctx.joinCode = null;
   playLoops(scr);
@@ -380,11 +399,12 @@ async function stRoomOnline(ctx) {
     }
     clearKids(content);
     const host = r.host === NET.me.id, cards = [];
-    r.members.forEach((p, i) => {
+    const entries = [...r.members.map((p) => ({ ...p, roomRole: 'player' })), ...(r.spectators || []).map((p) => ({ ...p, roomRole: 'spectator' }))];
+    entries.forEach((p, i) => {
       const c = instantiate(scr, content, 'room_player_card');
       scr.show('root_empty', false, c); scr.show('root_wait', false, c); scr.show('root_main', true, c);
       scr.show('text_toggle/text_wait', false, c); scr.show('text_toggle/text_name', true, c);
-      scr.text('text_toggle/text_name', (p.id === NET.me.id ? `${p.name}（我）` : p.name) + (p.away ? '（断线中）' : ''), c);
+      scr.text('text_toggle/text_name', (p.id === NET.me.id ? `${p.name}（我）` : p.name) + (p.roomRole === 'spectator' ? '（观战）' : '') + (p.away ? '（断线中）' : ''), c);
       scr.image('avatar_container/avatar_img', avatarUri(p.avatar), c);
       scr.show('state_host', p.id === r.host, c); scr.show('state_bg_player', p.id === NET.me.id, c);
       scr.one('group_options', c).active = false;
@@ -394,19 +414,20 @@ async function stRoomOnline(ctx) {
     roomGrid(scr, content, cards);
     scr.text('root_roomid/text_id', r.code);
     scr.text('layout_num/text_num', String(r.max));
-    scr.text('root_text/text_num1', String(r.members.length)); scr.text('root_text/text_num2', String(r.max));
+    scr.text('root_text/text_num1', `${r.members.length}/${r.max}`); scr.text('root_text/text_num2', `${(r.spectators || []).length} 观战`);
     scr.show('button_room_host', host); scr.show('button_room_guest', !host);
     const enough = r.members.length >= (DCFG.consts.minRoomNum || 2) || r.npc;
     scr.show('button_room_host/root_host_lack', host && !enough); scr.show('button_room_host/root_host_start', host && enough); scr.show('button_room_host/root_back', false);
     scr.text('root_host_lack/text_start', `至少再邀请\n${Math.max(1, (DCFG.consts.minRoomNum || 2) - r.members.length)}名玩家`);
     scr.show('button_npc/root_normal', !r.npc); scr.show('button_npc/root_select', r.npc);
-    phase(`群组房间 ${r.code} · ${r.members.length}/${r.max} 人${r.npc ? ' · NPC 补位' : ''}${host ? '（你是房主）' : '（等待房主开局）'}`);
+    phase(`群组房间 ${r.code} · ${r.members.length}/${r.max} 玩家 · ${(r.spectators || []).length} 观战${r.npc ? ' · NPC 补位' : ''}${host ? '（你是房主）' : '（等待房主开局）'}`);
   };
   scr.tap('button_npc', () => { if (room && room.host === NET.me.id) NET.lobby.send({ t: 'room.npc', on: !room.npc }); else toast('只有房主可以设置 NPC 补位'); });
   scr.tap('root_roomid/button', () => {
     if (!room) return;
-    const ok = () => toast(DCFG.constToast ? DCFG.constToast.roomIdCopySuccess : '房间码已复制，快去邀请房客吧');
-    navigator.clipboard ? navigator.clipboard.writeText(room.code).then(ok, () => toast('邀请码：' + room.code, 4)) : toast('邀请码：' + room.code, 4);
+    const invite = new URL(location.href); invite.searchParams.set('room', room.code);
+    const ok = () => toast(DCFG.constToast ? DCFG.constToast.roomIdCopySuccess : '邀请链接已复制，快去邀请房客吧');
+    navigator.clipboard ? navigator.clipboard.writeText(invite.href).then(ok, () => toast('邀请码：' + room.code, 4)) : toast('邀请码：' + room.code, 4);
   });
   scr.tap('button_room_host', () => NET.lobby.send({ t: 'room.start' }));
   scr.tap('panel_top/button_back', () => { result = 'back'; });
@@ -417,7 +438,7 @@ async function stRoomOnline(ctx) {
     else if (m.t === 'elsewhere') {
       // the room is on another node: join it there
       if (!nodeHost(m.host)) { toast('这个房间在另一台服务器上，请从游戏入口页进入后再加入', 4); result = 'back'; continue; }
-      try { await moveLobby(m.host); NET.lobby.send({ t: 'room.join', code: m.code }); joined = true; } catch (e) { toast('无法连接房间所在的服务器', 3); result = 'back'; }
+      try { await moveLobby(m.host); NET.lobby.send({ t: 'room.join', code: m.code, role: joinRole || 'player' }); joined = true; } catch (e) { toast('无法连接房间所在的服务器', 3); result = 'back'; }
     }
     else if (m.t === 'matched') { try { await joinMatch(m); result = 'show'; } catch (e) { toast(e.message, 3); } }
     else if (m.t === 'error') { toast(m.msg, 3); if (!room) result = 'back'; }
@@ -429,6 +450,23 @@ async function stRoomOnline(ctx) {
   if (result === 'back' && WS_HOST !== location.host) { try { await moveLobby(location.host); } catch (e) { toast('与大厅的连接已断开', 3); } }
   scr.close();
   return result === 'show' ? 'show' : joined ? 'entry' : 'prepare';
+}
+
+async function chooseRoomRole(info) {
+  const box = document.getElementById('roomRole');
+  const status = document.getElementById('roomRoleStatus');
+  const player = document.getElementById('roomRolePlayer');
+  const spectator = document.getElementById('roomRoleSpectator');
+  status.textContent = `${info.code} · ${MODES.find((m) => m.id === info.mode)?.name || info.mode} · ${info.max} 人`;
+  player.disabled = !!(info.started || info.full);
+  box.hidden = false;
+  return new Promise((resolve) => {
+    const done = (role) => { box.hidden = true; player.onclick = spectator.onclick = cancel.onclick = null; resolve(role); };
+    const cancel = document.getElementById('roomRoleCancel');
+    player.onclick = () => done('player');
+    spectator.onclick = () => done('spectator');
+    cancel.onclick = () => done(null);
+  });
 }
 
 // ---- the browser's 加入群组: a room code ---------------------------------------------------------------------------------
