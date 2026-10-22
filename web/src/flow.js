@@ -526,13 +526,29 @@ async function stRoom(ctx) {
 
 // ---- 4 STARTING SOON -----------------------------------------------------------------------------------------------
 const currentElapsedMs = (current) => Math.max(0, (current?.elapsedMs || 0) + (G.currentAt ? performance.now() - G.currentAt : 0));
+const matchState = (current) => ({ wait: 'wait', show: 'show', loading: 'loading', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[current?.phase] || 'show');
+function takeMatchSync(scr, ctx) {
+  const sync = NET.match?.take('sync');
+  if (!sync) return null;
+  applyMatchSnapshot(sync);
+  if (ctx?.pending) { ctx.pending(); ctx.pending = null; }
+  if (scr) scr.close();
+  return matchState(G.current);
+}
+async function waitWithMatchSync(promise, scr) {
+  for (;;) {
+    const state = takeMatchSync(scr);
+    if (state) return state;
+    if (await Promise.race([promise.then(() => true), wait(0.05).then(() => false)])) return takeMatchSync(scr);
+  }
+}
 async function stWait() {
   phase('等待其他玩家连接');
   for (;;) {
     const m = await NET.match.next(['phase', 'sync', 'finish']);
     if (m.t === 'sync') {
       applyMatchSnapshot(m);
-      return ({ wait: 'wait', show: 'show', loading: 'loading', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[m.current?.phase] || 'show');
+      return matchState(m.current);
     }
     if (m.t === 'finish') { G.matchOver = true; return 'finish'; }
     if (m.name === 'show') return 'show';
@@ -540,6 +556,8 @@ async function stWait() {
   }
 }
 async function stShow(ctx) {
+  const syncState = takeMatchSync();
+  if (syncState) return syncState;
   phase('即将开始');
   const scr = new Screen('enemy_duel_entrance_show_dialog', { z: 30 });
   scr.text('root_num/text_num', `${players.length} 名观众已进入直播间`);
@@ -562,33 +580,49 @@ async function stShow(ctx) {
   sfx('g_ui_dqstartsign');
   const elapsed = G.current?.phase === 'show' ? currentElapsedMs(G.current) : 0;
   if (elapsed < 9000) {
-    await scr.play('view', 'start_in_10');
-    await wait(Math.max(0, 1 - elapsed / 1000));
-    await scr.play('view', 'start_out');
+    let state = await waitWithMatchSync(scr.play('view', 'start_in_10'), scr);
+    if (state) return state;
+    state = await waitWithMatchSync(wait(Math.max(0, 1 - elapsed / 1000)), scr);
+    if (state) return state;
+    state = await waitWithMatchSync(scr.play('view', 'start_out'), scr);
+    if (state) return state;
   }
+  const latestSync = takeMatchSync(scr);
+  if (latestSync) return latestSync;
   ctx.pending = () => scr.close();
   return 'loading';
 }
 
 // ---- 5 loading ------------------------------------------------------------------------------------------------------
 async function stLoading(ctx) {
+  const syncState = takeMatchSync(null, ctx);
+  if (syncState) return syncState;
   phase('等待加载');
   sfx('g_ui_dqload');
   let scr;
   await wipe(async () => { if (ctx.pending) { ctx.pending(); ctx.pending = null; } scr = new Screen('enemy_duel_ui_battle_start_panel', { z: 30 }); }, '进入直播间');
+  const latestSync = takeMatchSync(scr);
+  if (latestSync) return latestSync;
   scr.text('panel_text/text_stage_name', `${G.mode.name} · ${C.matchTabText || '直播主赛场'}`);
   playLoops(scr);
   // the models load when a round's line-up is drawn (the bet window gives them time); here only the screen's own pace
   const elapsed = G.current?.phase === 'loading' ? currentElapsedMs(G.current) : 0;
-  await wait(Math.max(0, 2.2 - elapsed / 1000));
+  const delayState = await waitWithMatchSync(wait(Math.max(0, 2.2 - elapsed / 1000)), scr);
+  if (delayState) return delayState;
   if (G.online) {
     if (G.role !== 'spectator') NET.match.send({ t: 'ready' });
-    const m = await NET.match.next(['round', 'finish']);
+    const m = await NET.match.next(['round', 'finish', 'sync']);
+    if (m.t === 'sync') { applyMatchSnapshot(m); scr.close(); return matchState(m.current); }
+    const queuedSyncState = takeMatchSync(scr);
+    if (queuedSyncState) return queuedSyncState;
     NET.match.q.unshift(m);
   }
   scr.text('panel_text/text_tip', '全部玩家已完成加载');
-  await wait(Math.max(0, 0.5 - Math.max(0, elapsed / 1000 - 2.2)));
+  const tipState = await waitWithMatchSync(wait(Math.max(0, 0.5 - Math.max(0, elapsed / 1000 - 2.2))), scr);
+  if (tipState) return tipState;
   await fadeOut(scr);
+  const finalSyncState = takeMatchSync();
+  if (finalSyncState) return finalSyncState;
   return 'game';
 }
 

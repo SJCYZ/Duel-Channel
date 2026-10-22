@@ -15,3 +15,8 @@
 - `git diff --check`：通过。
 - 未新增或运行测试，遵照当前开发要求。
 - 未推送或合并。
+
+## 后续修复：show/loading 消费重连同步
+
+- 修复 stShow() 与 stLoading() 未消费重连 sync 的路径：入口、展示/等待过程及阶段交接均检查同步快照，并按 current.phase 路由。stLoading() 的消息等待现在也接收 sync；快照生效后关闭当前屏幕及待关闭的 show 屏幕，不把旧同步留给后续阶段。seq 去重与快照权威性保持不变。
+- 自审确认只覆盖 web/src/flow.js 此同步路径及本报告；未新增或运行测试。git diff --check：通过。
