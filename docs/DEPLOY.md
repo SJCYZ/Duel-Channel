@@ -78,7 +78,7 @@ sudo systemctl enable --now duel-channel
 journalctl -u duel-channel -f        # 查看日志
 ```
 
-服务器自身不提供 HTTPS。公开架设时必须放在 HTTPS 反向代理之后，并将网关端口限制为本机或私网可达；不要让网关端口直接接受公网连接。只有当网关看到的 TCP 对端是 loopback 或私网地址时，`TRUST_PROXY=1` 才会采用经过 IP 校验的 `X-Forwarded-For` 最右侧地址。反向代理必须覆盖入站的 `X-Forwarded-For`，写入它实际观察到的客户端地址，并屏蔽公网对 `/status` 的访问。公网监控应转发 `/healthz`；详细状态仅通过本机或 Tailnet 专用的 Tailscale Serve 查询。配置示例见「状态与健康检查」。另请遵守非商业的使用限制（[NOTICE.md](../NOTICE.md)）。
+服务器自身不提供 HTTPS。公开架设时必须放在 HTTPS 反向代理之后，并将网关端口限制为本机或私网可达；不要让网关端口直接接受公网连接。只有当网关看到的 TCP 对端是 loopback 或私网地址时，`TRUST_PROXY=1` 才会采用经过 IP 校验的 `X-Forwarded-For` 最右侧地址。反向代理必须覆盖入站的 `X-Forwarded-For`，写入它实际观察到的客户端地址，并屏蔽公网对 `/status` 前缀的访问（包括 `/status.json`）。公网监控应转发 `/healthz`；详细状态仅通过本机或 Tailnet 专用的 Tailscale Serve 查询。配置示例见「状态与健康检查」。另请遵守非商业的使用限制（[NOTICE.md](../NOTICE.md)）。
 
 ### 页面怎样加载
 
@@ -129,7 +129,7 @@ node server/launch.mjs --host 0.0.0.0       # 网关监听所有网卡（局域�
 
 - 每轮的战斗种子在押注结束后才发给页面，开局时只给出它的承诺（`sha256(种子:盐)`），页面会核对；押注的最后 7 秒是暗选，这时的选择不公开；知道结果的 NPC 只在暗选时段选择。规则见 [MECHANICS.md](MECHANICS.md)「押注与结算」。
 - 公开匹配（礼物对决、竞猜对决的匹配队列）：同一个浏览器同时只能占一个座位（排队中或比赛还在进行时不能再排队）；同一地址的玩家会被分到不同的桌（`QUEUE_SAME_IP=1` 可以关掉）。群组房间由房主邀请，不受这两条限制。
-- 限流：大厅和对局连接的消息都有速率上限，持续刷消息的连接会被断开；同一地址每分钟最多输错 10 次房间邀请码。`/status` 仅允许 loopback 客户端或来自可信本机/私网代理、带有 Tailscale Serve 身份头的请求读取。公网反向代理必须屏蔽 `/status` 并清除客户端传入的 `Tailscale-User-Login`；代理对外提供 `/healthz` 作为精简健康检查。
+- 限流：大厅和对局连接的消息都有速率上限，持续刷消息的连接会被断开；同一地址每分钟最多输错 10 次房间邀请码。`/status` 图形页和 `/status.json` 仅允许 loopback 客户端或来自可信本机/私网代理、带有 Tailscale Serve 身份头的请求读取。公网反向代理必须屏蔽 `/status` 前缀并清除客户端传入的 `Tailscale-User-Login`；代理对外提供 `/healthz` 作为精简健康检查。
 - 防滥用（防止有人开一堆房间或比赛占满服务器）：按网络计数——IPv4 按地址、IPv6 按 /64 前缀（一个家庭或用户通常拥有整个 /64）——限制大厅连接数、同时存在的房间数、每分钟建房次数和进行中的比赛数，全服也有房间和比赛的总数上限，数值见上面的参数表（设为 `0` 表示不限）。勾选 NPC 补位的房间一个人就能开局，每场比赛都要在对战实例上模拟十轮，所以比赛数是最要紧的一条；1 核的小服务器建议把 `MAX_MATCHES` 调到 20～30。未启用可信代理或代理地址不受信时，连接按 TCP 对端地址计数；公开架设须启用 `TRUST_PROXY=1`，并确保网关前的代理从本机或私网连接且覆盖传入 XFF，否则所有玩家可能按代理地址计数，限流无法按玩家地址区分。被拒绝的情况每个网络每分钟记一行日志（`limit: …`），`/status` 的 `gateway.limits` 显示当前上限，`gateway.playing` 是正在进行的比赛数；该详细页面仅通过本机或 Tailnet 专用的 Tailscale Serve 查询。
 - 机器人（`bots.mjs`）和 NPC 补位不受这些限制影响。
 
@@ -147,10 +147,13 @@ npm start -- --debug            # 或 DUEL_DEBUG=1 npm start
 
 ### 状态与健康检查
 
-- <http://127.0.0.1:8600/status>：实例负载、进行中的比赛、匹配队列、房间、最近的服务端错误（`errors`）和收到的错误报告数（`reports`）。仅 loopback 客户端或来自可信本机/私网代理、带有 Tailscale Serve 身份头的请求可读取；其他客户端收到空 `404`。公网反向代理必须继续屏蔽此路径并清除客户端传入的 `Tailscale-User-Login`。
+- <http://127.0.0.1:8600/status>：中文图形状态页，显示实例负载、进行中的比赛、匹配队列、等待房间和最近 100 场最终结算；页面每 5 秒刷新。
+- <http://127.0.0.1:8600/status.json>：供机器读取的状态 JSON，保留网关、房间、实例与队列字段，并附最近 100 场历史。
+
+  两个状态入口使用相同的访问限制：仅 loopback 客户端或来自可信本机/私网代理、带有 Tailscale Serve 身份头的请求可读取；其他客户端收到空 `404`。公网反向代理必须屏蔽 `/status` 前缀并清除客户端传入的 `Tailscale-User-Login`。
 - <http://127.0.0.1:8600/healthz>：`{"ok":true,"instances":N,"page":true}`，供容器与监控使用，反向代理应转发此路径。页面尚未构建时首页返回 503 并给出提示。
 
-ECS 可通过 Tailscale Serve 提供 Tailnet 专用的完整网页入口（页面、资源、WebSocket 和 `/status`）：
+ECS 可通过 Tailscale Serve 提供 Tailnet 专用的完整网页入口（页面、资源、WebSocket 和状态页）：
 
 ```bash
 tailscale serve --https=8443 --bg http://127.0.0.1:8600
@@ -196,7 +199,7 @@ server {
 
 - 网关或实例遇到未捕获的异常时，会记录后退出，再由启动器自动重启（等待 1、2、4… 秒，最多 30 秒）。同一个进程一分钟内退出超过 5 次就不再重启，控制台会说明原因。实例重启后正在进行的比赛会丢失；网关重启后，玩家页面会自动重连并重新登录大厅。
 - 错误报告接口（`POST /report`）：每份最大 64 KB，同一地址每分钟最多 5 份、每小时最多 30 份。
-- 日志目录可以用环境变量 `DUEL_LOGS` 指定。Docker 镜像里是 `/app/logs`，需要保留时挂载出来：`-v duel-logs:/app/logs`。
+- 日志目录可以用环境变量 `DUEL_LOGS` 指定。完成对局的最终结算摘要保存在 `${DUEL_LOGS}/matches/`，最多保留 100 场。Docker 镜像里默认目录是 `/app/logs`，容器重建后仍要保留历史时需挂载持久卷，例如 `-v duel-logs:/app/logs`；部署多个比赛实例时，它们必须共享同一个 `DUEL_LOGS` 目录或卷。
 
 ## 4. 和朋友一起玩（局域网）
 

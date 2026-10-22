@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { randomBytes, randomInt, createHash } from 'node:crypto';
+import { saveMatchHistory } from './match-history.mjs';
 
 const root = new URL('..', import.meta.url);
 const load = (p) => readFileSync(new URL(p, root), 'utf8');
@@ -50,12 +51,13 @@ const avatarKeys = () => SIM.POOL.map((f) => f.key);
 
 export class Match {
   constructor({ id, mode, humans, npcFill, capacity, log = () => {}, onError = null }) {
-    this.id = id; this.mode = mode; this.log = log; this.onError = onError; this.done = false; this.round = null; this.r = 0; this.phase = 'wait'; this.phaseStartedAt = Date.now(); this.later = new Set();
+    this.id = id; this.mode = mode; this.log = log; this.onError = onError; this.done = false; this.startedAt = new Date().toISOString(); this.round = null; this.r = 0; this.phase = 'wait'; this.phaseStartedAt = Date.now(); this.later = new Set();
     this.seq = 0; this.observers = new Set(); this.currentRound = null; this.publicChoices = {}; this.secret = false; this.battleStartAt = null; this.battleResult = null;
     this.stand = SIM.isStand(mode); this.T = timings(this.stand);
     // the rounds in turn, each the three events' versions of it (one drawn when it comes)
     this.rounds = SIM.roundTable(mode);
     const max = capacity || (SIM.DCFG.modes[mode] || {}).maxPlayer || 8;
+    this.capacity = max;
     const used = new Set(humans.map((h) => h.avatar));
     // NPC portraits: unused ones first (30 seats outnumber the roster: then any)
     const freeAvatar = () => { const k = avatarKeys().filter((x) => !used.has(x)), from = k.length ? k : avatarKeys(); const a = from[Math.floor(Math.random() * from.length)]; used.add(a); return a; };
@@ -247,6 +249,8 @@ export class Match {
       this.setPhase('finish');
       const fin = this.snapshot();
       this.bcast({ t: 'finish', players: fin });
+      try { await saveMatchHistory(this, fin); }
+      catch (e) { if (this.onError) this.onError(e); else this.log(`match ${this.id}: could not save history: ${e.message || e}`); }
       this.log(`match ${this.id} finished: ${this.stand
         ? fin.slice().sort((a, b) => a.rank - b.rank).map((p) => `#${p.rank} ${p.name} ${p.pass}`).join(', ')
         : this.players.slice().sort((a, b) => b.pts - a.pts).map((p) => `${p.name} ${p.pts}`).join(', ')}`);

@@ -177,3 +177,6 @@ const pk = write(join(OUT, 'pack', name), packText);
 const info = { url: 'pack/' + name, size: Buffer.byteLength(packText) };
 const shell = write(join(OUT, 'index.html'), page(`const PACK_INFO = ${JSON.stringify(info)};\n` + safe(rd(join(ROOT, 'web', 'src', 'loader.js')))));
 console.log(`${rel(join(OUT, 'index.html'))}  ${mb(shell.raw)} (brotli ${mb(shell.br)})  + pack/${name}  ${mb(pk.raw)} (brotli ${mb(pk.br)})`);
+
+const status = write(join(OUT, 'status.html'), rd(join(ROOT, 'web', 'status.src.html')));
+console.log(`${rel(join(OUT, 'status.html'))}  ${mb(status.raw)} (brotli ${mb(status.br)})`);
