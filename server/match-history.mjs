@@ -69,7 +69,14 @@ export async function saveMatchHistory(match, finalPlayers) {
 
 export async function readMatchHistory() {
   try {
-    const files = await historyFiles();
+    let files = await historyFiles();
+    if (files.length > KEEP) return await withLock(async () => {
+      files = await historyFiles();
+      const ranked = await Promise.all(files.map(async (name) => ({ name, record: await readEntry(name) })));
+      ranked.sort((a, b) => (Date.parse(b.record?.endedAt || '') || 0) - (Date.parse(a.record?.endedAt || '') || 0));
+      await Promise.all(ranked.slice(KEEP).map(({ name }) => rm(join(DIR, name), { force: true })));
+      return ranked.slice(0, KEEP).map(({ record }) => record).filter(Boolean);
+    });
     const entries = await Promise.all(files.map(readEntry));
     return entries.filter(Boolean).sort((a, b) => Date.parse(b.endedAt) - Date.parse(a.endedAt)).slice(0, KEEP);
   } catch (e) { return []; }
