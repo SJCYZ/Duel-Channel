@@ -1350,7 +1350,7 @@ function fit() {
 let last = performance.now(), video = null;
 function frame(now) {
   const rdt = Math.min(0.1, (now - last) / 1000); last = now;
-  const dt = rdt * CLOCK.scale;
+  const dt = rdt;
   CLOCK.t += dt;
   tickTimers();
   tickAnims(dt);
@@ -1448,11 +1448,6 @@ const settings = {
 };
 function controls() {
   settings.init();
-  const speeds = [1, 2, 4];
-  const sp = $('speed');
-  sp.innerHTML = speeds.map((v) => `<button data-v="${v}" aria-pressed="${v === 1}">${v}×</button>`).join('');
-  sp.onclick = (e) => { const b = e.target.closest('button'); if (!b) return; CLOCK.scale = Number(b.dataset.v); for (const x of sp.children) x.setAttribute('aria-pressed', x === b); };
-  $('ff').onclick = () => { if (arena && arena.running) { arena.ff = 12; toast('快进本场战斗'); } else toast('当前没有进行中的战斗'); };
   $('mus').onclick = (e) => { setMusicOn(!SND.musicOn); e.currentTarget.setAttribute('aria-pressed', SND.musicOn); };
   $('snd').onclick = (e) => { SND.sfxOn = !SND.sfxOn; e.currentTarget.setAttribute('aria-pressed', SND.sfxOn); sfx('click'); };
   // the built-in tracks (BGM_TRACKS), then a file of the viewer's own

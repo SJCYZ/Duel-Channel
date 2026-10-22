@@ -3,13 +3,13 @@
 // screen's own shape on a touch screen: FRAME, in the page; anchors place the UI as the game's CanvasScaler would): RectTransform layout
 // (y up → y down), a simplified Horizontal/VerticalLayoutGroup + ContentSizeFitter + LayoutElement pass, legacy
 // AnimationClip playback (cubic Hermite keys, ±1e30 slopes stepped), clickable hotspots and prefab templates
-// instantiated into list containers at run time. Everything runs on one game clock (CLOCK) that the speed control scales.
+// instantiated into list containers at run time. Everything runs on one game clock (CLOCK).
 const D = DUEL, SPR = D.sprites;
 const $ = (id) => document.getElementById(id);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const lerp = (a, b, t) => a + (b - a) * t;
-const CLOCK = { t: 0, scale: 1, timers: [] };
-// a promise resolved after `sec` seconds of game time (the speed control scales it)
+const CLOCK = { t: 0, timers: [] };
+// a promise resolved after `sec` seconds of game time
 function wait(sec) { return new Promise((res) => CLOCK.timers.push({ at: CLOCK.t + Math.max(0, sec), res })); }
 function tickTimers() {
   const due = CLOCK.timers.filter((x) => x.at <= CLOCK.t);

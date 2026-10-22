@@ -51,7 +51,7 @@ const REPORT = (() => {
       `- 浏览器：${ua}`,
       `- 显卡：${gpu()}`,
       `- 窗口：${innerWidth}×${innerHeight}，像素比 ${devicePixelRatio || 1}，语言 ${navigator.language}`,
-      `- 运行：${at()} 秒，整体速度 ×${v(() => CLOCK.scale)}`,
+      `- 运行：${at()} 秒`,
       `- 赛事：${v(() => G.mode.name)}，第 ${v(() => G.round || 0)} 轮，阶段「${v(() => $('phase').textContent, '')}」`,
     ];
     if (online) {

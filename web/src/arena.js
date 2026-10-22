@@ -1536,7 +1536,7 @@ function setupRound(lineups, seed, traps, enter = true) {
   arena.W = makeWorld(lineups, seed ?? 0, true, arena.traps);
   // a giant makes its entrance as the line-up comes on
   for (const u of arena.W.units) attachView(u, enter && u.giant);
-  arena.acc = 0; arena.ff = 1; arena.running = false;
+  arena.acc = 0; arena.running = false;
   // 竞猜对决 has no last round: the round alone
   const stand = typeof G !== 'undefined' && G.mode && G.mode.key === 'stand';
   setLedArt(stand);
@@ -1583,7 +1583,6 @@ function seekTo(elapsedMs) {
   const target = Math.max(0, elapsedMs / 1000);
   arena.running = false;
   arena.acc = 0;
-  arena.ff = 1;
   while (!W.done && W.t + 1e-9 < target) {
     simStep(W);
     W.events.length = 0;
@@ -1864,7 +1863,7 @@ function unitHud(u, dt, k, s) {
 // Playback speeds up as a battle drags on (the event's behaviour as players describe it; no table or client constant
 // carries the curve): 1× for the first 15 s of battle time, rising linearly to 2× at 45 s and 3× at 90 s, 3× after
 // that. It changes how fast the fight is shown, never the fight: the sim steps are the same, so every client and the
-// server's prediction still agree. Fast-forward (arena.ff) multiplies on top.
+// server's prediction still agree.
 const PLAYBACK = [[0, 1], [15, 1], [45, 2], [90, 3]];
 function playbackRate(t) {
   for (let i = 1; i < PLAYBACK.length; i++) {
@@ -1876,7 +1875,7 @@ function playbackRate(t) {
 function arenaFrame(dt) {
   if (!arena) return;
   const W = arena.W;
-  const rate = W ? arena.ff * playbackRate(W.t) : 1;
+  const rate = W ? playbackRate(W.t) : 1;
   arena.rate = rate;
   if (W && arena.running) {
     arena.acc += dt * rate;
@@ -1885,34 +1884,33 @@ function arenaFrame(dt) {
       arena.acc -= DT;
       simStep(W);
     }
-    // events → effects (when fast-forwarding, only the big ones)
-    const busy = rate > 3;
+    // events → effects
     for (const [kind, u, a] of W.events) {
-      if (kind === 'hit') { if (!busy && u.view && !efxHit(u, a, W)) fxHit(u, a); if (u.view) u.flash = 0.1; }
+      if (kind === 'hit') { if (u.view && !efxHit(u, a, W)) fxHit(u, a); if (u.view) u.flash = 0.1; }
       else if (kind === 'die') fxDie(u);
       else if (kind === 'gone') fxGone(u);
       else if (kind === 'spawn') { attachView(u, true); fxSpawn(u); if (u.dropped && !u.dropShown) { u.dropShown = true; fxDrop(u); } }
       else if (kind === 'chan' || kind === 'liberty' || kind === 'swap' || kind === 'unload') { if (u.view) u.wantSkill = true; }
-      else if (kind === 'spin') { if (!busy) fxWhirl(u, u.f.key === 'enemy_15070_dqhlgy' ? 1.2 : 1); }
-      else if (kind === 'area') { if (!busy) fxArea(u, a); }
-      else if (kind === 'chain') { if (!busy) fxChain(u); }
+      else if (kind === 'spin') fxWhirl(u, u.f.key === 'enemy_15070_dqhlgy' ? 1.2 : 1);
+      else if (kind === 'area') fxArea(u, a);
+      else if (kind === 'chain') fxChain(u);
       else if (kind === 'elem') fxElem(u, a);
-      else if (kind === 'heal') { if (!busy) fxHeal(u); }
+      else if (kind === 'heal') fxHeal(u);
       else if (kind === 'icicle') fxIcicle(a.col);
-      else if (kind === 'breath') { if (!busy) fxBreath(); }
-      else if (kind === 'quill') { if (!busy) fxQuill(u); }
+      else if (kind === 'breath') fxBreath();
+      else if (kind === 'quill') fxQuill(u);
       else if (kind === 'fourdir') fxFourDir(u);
       else if (kind === 'eat' || kind === 'door') { if (a && a.view) a.wantSkill = true; }
       else if (kind === 'boom') fxBoom(u);
       else if (kind === 'blast') { fxBlast(u); u.wantSkill = true; }
       else if (kind === 'zone') { if (W.zone >= 0) { sfx('b_ui_dqsafearea'); arena.flashT = 1; } }
-      else if (kind === 'stun' || kind === 'frozen') { if (!busy && u.view) { const [x, y, k] = chest(u, 1); FX.spawn('flare', x, y, { life: 0.3, s0: 0.3 * k, s1: 0.6 * k, a0: 0.8, tint: kind === 'frozen' ? COL.ice : 0xfff0a0 }); } }
+      else if (kind === 'stun' || kind === 'frozen') { if (u.view) { const [x, y, k] = chest(u, 1); FX.spawn('flare', x, y, { life: 0.3, s0: 0.3 * k, s1: 0.6 * k, a0: 0.8, tint: kind === 'frozen' ? COL.ice : 0xfff0a0 }); } }
       else if (kind === 'revive') fxRevive(u);
-      else if (kind === 'cross') { if (!busy) fxCross(a); }
+      else if (kind === 'cross') fxCross(a);
       else if (kind === 'barrier' || kind === 'barrierbreak' || kind === 'barrierblast') { fxBarrier(u, kind); if (kind !== 'barrierbreak') u.wantSkill = true; }
       else if (kind === 'fearcharge') u.wantSkill = true;
       else if (kind === 'fear' || kind === 'fearend') { if (u.view) fxFear(u, kind === 'fear'); }
-      else if (kind === 'pulse' || kind === 'trapfire' || kind === 'arc' || kind === 'shock' || kind === 'bolt' || kind === 'cratehit' || kind === 'crategone') { if (!busy || kind === 'crategone' || kind === 'pulse') trapEvent(kind, u, a); }
+      else if (kind === 'pulse' || kind === 'trapfire' || kind === 'arc' || kind === 'shock' || kind === 'bolt' || kind === 'cratehit' || kind === 'crategone') trapEvent(kind, u, a);
     }
     W.events.length = 0;
     if (W.done) {
@@ -1944,7 +1942,7 @@ function arenaFrame(dt) {
       if (vx || vy) s.g.children[1].rotation = Math.atan2(vy, vx) + Math.PI / 2;
       s.g.position.set(sx, y);
       s.trailT -= adt;
-      if (s.trailT <= 0 && rate <= 3) { s.trailT = 0.03; FX.spawn(arts ? 'rhombus' : 'spark', sx, y, { life: 0.2, s0: arts ? 0.25 : 0.35, s1: 0.05, tint: arts ? COL.arts : COL.phys, vr: 3 }); }
+      if (s.trailT <= 0) { s.trailT = 0.03; FX.spawn(arts ? 'rhombus' : 'spark', sx, y, { life: 0.2, s0: arts ? 0.25 : 0.35, s1: 0.05, tint: arts ? COL.arts : COL.phys, vr: 3 }); }
       s.px = sx; s.py = y;
     }
   }
