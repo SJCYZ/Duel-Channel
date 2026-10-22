@@ -49,13 +49,13 @@ const RATE_PER_S = 10, RATE_BURST = 20, RATE_KICK = 200, BET_CHANGES = 12;
 const avatarKeys = () => SIM.POOL.map((f) => f.key);
 
 export class Match {
-  constructor({ id, mode, humans, npcFill, log = () => {}, onError = null }) {
-    this.id = id; this.mode = mode; this.log = log; this.onError = onError; this.done = false; this.round = null; this.r = 0; this.phase = 'wait'; this.later = new Set();
-    this.hist = []; this.seq = 0; this.roundFrom = 0;
+  constructor({ id, mode, humans, npcFill, capacity, log = () => {}, onError = null }) {
+    this.id = id; this.mode = mode; this.log = log; this.onError = onError; this.done = false; this.round = null; this.r = 0; this.phase = 'wait'; this.phaseStartedAt = Date.now(); this.later = new Set();
+    this.seq = 0; this.observers = new Set(); this.currentRound = null; this.publicChoices = {}; this.secret = false; this.battleStartAt = null; this.battleResult = null;
     this.stand = SIM.isStand(mode); this.T = timings(this.stand);
     // the rounds in turn, each the three events' versions of it (one drawn when it comes)
     this.rounds = SIM.roundTable(mode);
-    const max = (SIM.DCFG.modes[mode] || {}).maxPlayer || 8;
+    const max = capacity || (SIM.DCFG.modes[mode] || {}).maxPlayer || 8;
     const used = new Set(humans.map((h) => h.avatar));
     // NPC portraits: unused ones first (30 seats outnumber the roster: then any)
     const freeAvatar = () => { const k = avatarKeys().filter((x) => !used.has(x)), from = k.length ? k : avatarKeys(); const a = from[Math.floor(Math.random() * from.length)]; used.add(a); return a; };
@@ -81,28 +81,54 @@ export class Match {
       ...(rank ? { pass: p.pass, shield: p.shield, shieldAt: p.shieldAt, saved: p.saved, rank: rank[p.id] } : {}) }));
   }
   send(p, msg) { if (p.ws && p.ws.readyState === 1) p.ws.send(JSON.stringify(msg)); }
-  // every broadcast is numbered (seq) and, emojis aside, kept with its time: a seat that comes back gets what it missed
+  setPhase(phase) { this.phase = phase; this.phaseStartedAt = Date.now(); }
+  // Every broadcast reaches players and observers; only player-directed messages use send().
   bcast(msg) {
     const m = { ...msg, seq: ++this.seq };
-    if (msg.t !== 'emoji') { this.hist.push({ m, at: Date.now() }); if (msg.t === 'round') this.roundFrom = this.hist.length - 1; }
     const s = JSON.stringify(m);
     for (const p of this.players) if (p.ws && p.ws.readyState === 1) p.ws.send(s);
+    for (const ws of this.observers) if (ws.readyState === 1) ws.send(s);
   }
 
-  // a client's socket for its seat. `since` (the last seq it got) marks a dropped connection coming back: it is sent
-  // every broadcast after that. Without it (joining, or a reloaded page) it is sent the current round from its start
-  // (before the first round: everything). Each replayed message carries its age (ms), so the client's countdowns and
-  // battle replay line up with the instance's clock. A finished match still answers for a while (the final standings).
-  attach(ws, tok, since = null) {
+  current(p = null) {
+    const current = { phase: this.phase, elapsedMs: Date.now() - this.phaseStartedAt };
+    if (this.currentRound) current.round = this.currentRound;
+    if (this.phase === 'bet') {
+      current.secret = this.secret;
+      current.publicChoices = { ...this.publicChoices };
+      if (p?.choice) current.ownChoice = p.choice;
+    } else if (this.phase === 'battle' || this.phase === 'result' || this.phase === 'finish') {
+      current.publicChoices = { ...this.publicChoices };
+      if (this.battleResult) current.result = this.battleResult;
+      if (this.phase === 'battle' && this.battleSeed != null) {
+        current.seed = this.battleSeed; current.salt = this.battleSalt;
+        current.elapsedMs = Date.now() - this.battleStartAt;
+      }
+    }
+    return current;
+  }
+  hello(ws, role, p = null) {
+    ws.send(JSON.stringify({ t: 'hello', role, ...(p ? { you: p.id } : {}), mode: this.mode, rounds: this.stand ? null : this.rounds.length,
+      players: this.snapshot(true), phase: this.phase, seq: this.seq, current: this.current(p), debug: DEBUG }));
+  }
+  attachObserver(ws) {
+    this.observers.add(ws);
+    this.hello(ws, 'spectator');
+    ws.on('message', (data) => {
+      let m; try { m = JSON.parse(data); } catch (e) { return; }
+      if (m && m.t === 'ping' && Number.isFinite(m.c)) ws.send(JSON.stringify({ t: 'pong', c: m.c }));
+    });
+    ws.on('close', () => this.observers.delete(ws));
+    if (this.done) setTimeout(() => { try { ws.close(1000, 'match over'); } catch (e) { /* gone */ } }, 3000);
+  }
+  // a player's socket for their seat. Reconnects start from the current snapshot; no earlier broadcasts are replayed.
+  attach(ws, tok) {
     const p = this.players.find((x) => x.human && x.token === tok);
     if (!p || p.left) { ws.close(4001, 'bad token'); return; }
     if (p.ws && p.ws !== ws) try { p.ws.close(4002, 'replaced'); } catch (e) { /* gone */ }
     p.ws = ws; p.connected = true;
-    const resume = Number.isInteger(since) && since >= 0;
-    if (resume) this.log(`${p.name} reconnected (after #${since})`);
-    this.send(p, { t: 'hello', you: p.id, mode: this.mode, rounds: this.stand ? null : this.rounds.length, players: this.snapshot(true), phase: this.phase, resumed: resume, debug: DEBUG });
-    const from = resume ? this.hist.findIndex((h) => h.m.seq > since) : this.roundFrom;
-    if (from >= 0) for (const h of this.hist.slice(from)) this.send(p, { ...h.m, age: Date.now() - h.at });
+    this.log(`${p.name} connected`);
+    this.hello(ws, 'player', p);
     ws.on('message', (data) => {
       if (!this.allow(p)) { if (p.dropped > RATE_KICK) try { ws.close(4008, 'too many messages'); } catch (e) { /* gone */ } return; }
       let m; try { m = JSON.parse(data); } catch (e) { return; }
@@ -151,7 +177,10 @@ export class Match {
   }
   after(ms, fn) { const h = setTimeout(() => { this.later.delete(h); fn(); }, ms); this.later.add(h); }
   // a pick made: everyone sees it, but in the secret window only its maker (the others learn it as the bets close)
-  told(p) { if (this.secret) this.send(p, { t: 'bets', choices: { [p.id]: p.choice } }); else this.bcast({ t: 'bets', choices: { [p.id]: p.choice } }); }
+  told(p) {
+    if (this.secret) this.send(p, { t: 'bets', choices: { [p.id]: p.choice } });
+    else { this.publicChoices[p.id] = p.choice; this.bcast({ t: 'bets', choices: { [p.id]: p.choice } }); }
+  }
   // a bet is checked against the round's rules: 观望 only when the round allows it, 支持 only with enough gifts,
   // 全力支持 when the round opens it or the gifts no longer cover the stake. 竞猜对决: a side, nothing else.
   bet(p, m) {
@@ -203,9 +232,9 @@ export class Match {
       // everyone connects (a seat not connected yet is waited for, up to connectMax), sees STARTING SOON, loads
       const T = this.T;
       await this.waitHumans((p) => p.connected, T.connectMax, false);
-      this.phase = 'show'; this.bcast({ t: 'phase', name: 'show' });
+      this.setPhase('show'); this.bcast({ t: 'phase', name: 'show' });
       await sleep(T.show);
-      this.phase = 'loading'; this.bcast({ t: 'phase', name: 'loading', ms: T.loadMax });
+      this.setPhase('loading'); this.bcast({ t: 'phase', name: 'loading', ms: T.loadMax });
       await this.waitHumans((p) => p.ready, T.loadMax);
       // 礼物对决: the table's rounds while two viewers have gifts; 竞猜对决: until one viewer (or no human) is left, the
       // rounds past the table repeating its last row, at most modeStandRoundNumber
@@ -215,7 +244,7 @@ export class Match {
         if (this.stand ? SIM.standOver(this.players) : this.players.filter((p) => !p.out).length <= 1) break;
         await this.playRound(SIM.pickRound(this.stand ? SIM.standRow(this.rounds, r) : this.rounds[r - 1], Math.random), r);
       }
-      this.phase = 'finish';
+      this.setPhase('finish');
       const fin = this.snapshot();
       this.bcast({ t: 'finish', players: fin });
       this.log(`match ${this.id} finished: ${this.stand
@@ -225,6 +254,8 @@ export class Match {
     for (const h of this.later) clearTimeout(h);
     await sleep(3000);
     for (const p of this.players) if (p.ws) try { p.ws.close(1000, 'match over'); } catch (e) { /* gone */ }
+    for (const ws of this.observers) try { ws.close(1000, 'match over'); } catch (e) { /* gone */ }
+    this.observers.clear();
     this.done = true;
   }
   async playRound(rd, r) {
@@ -237,8 +268,10 @@ export class Match {
     const lrng = SIM.mulberry32(lineupSeed ^ 0x5bd1e995), lineups = SIM.makeLineups(rd, lrng), traps = SIM.makeTraps(rd, lrng);
     const pred = SIM.predict(lineups, seed, traps);
     for (const p of this.players) { p.choice = null; p.watched = false; p.betN = 0; }
-    this.phase = 'bet'; this.secret = false; this.seen = null;
+    this.setPhase('bet'); this.secret = false; this.seen = null; this.publicChoices = {}; this.battleResult = null; this.battleSeed = null; this.battleSalt = null; this.battleStartAt = null;
     const secretMs = Math.min(T.bet, env('DUEL_SECRET_MS', ((stand ? C.modeStandSelectTimeLast : C.modeOperationSelectTimeLast) || 7) * 1000)), openMs = T.bet - secretMs;
+    this.currentRound = { r, roundId: rd.roundId, lineups: lineups.map((s) => s.map((g) => [g.f.key, g.n])), traps, commit: commitOf(seed, salt), betMs: T.bet, secretMs,
+      ...(DEBUG ? { seed, salt } : {}) };
     this.bcast({ t: 'round', r, roundId: rd.roundId, lineups: lineups.map((s) => s.map((g) => [g.f.key, g.n])), traps, commit: commitOf(seed, salt), betMs: T.bet, secretMs,
       ...(DEBUG ? { seed, salt } : {}) });
     // the NPC viewers: the FOLLOW_* ones (priority > 0) see the supporters as everyone could when the window turned
@@ -271,14 +304,16 @@ export class Match {
       else if (stand) p.choice = { side: Math.random() < 0.5 ? 0 : 1 };
       else { const short = p.pts < rd.roundScore; p.choice = rd.canSkip ? { skip: true } : { side: Math.random() < 0.5 ? 0 : 1, kind: short ? 'all' : 'normal', forced: short }; }
     }
-    this.phase = 'battle';
+    this.publicChoices = Object.fromEntries(this.players.filter((p) => p.choice).map((p) => [p.id, p.choice]));
+    this.setPhase('battle'); this.battleStartAt = Date.now(); this.battleSeed = seed; this.battleSalt = salt;
     this.bcast({ t: 'battle', choices: Object.fromEntries(this.players.filter((p) => p.choice).map((p) => [p.id, p.choice])), seed, salt });
     // reactions while the fight runs (after the clients' round-start banner, within the battle)
     this.npcEmotes('battle', () => 2500 + Math.random() * Math.max(1000, Math.min(8000, pred.time * 1000)));
     await this.waitHumans((p) => p.watched, pred.time * 1000 + T.battleExtra);
     for (const p of this.players) if (stand) SIM.settleStand(p, p.choice, r, pred.winner); else SIM.settleOne(p, p.choice, rd, pred.winner);
-    this.phase = 'result';
-    this.bcast({ t: 'result', r, w: pred.winner, players: this.snapshot() });
+    this.setPhase('result');
+    this.battleResult = { r, w: pred.winner, players: this.snapshot() };
+    this.bcast({ t: 'result', ...this.battleResult });
     // the outcome: the clients show the arena a moment longer before the round's panel
     this.npcEmotes('result', () => 100 + Math.random() * 700, (p) => p.right);
     await sleep(T.result + T.rank);

@@ -1,23 +1,23 @@
 // A battle instance: hosts any number of matches. The gateway creates matches here (POST /create, local only); players'
-// connections come through the gateway's relay to ws://127.0.0.1:<port>/match?m=<match>&k=<seat token>[&since=<last
-// seq>] (since: a dropped connection coming back, game.mjs attach). GET /status reports the load.
-// env: PORT (required), HOST (bind address, default 127.0.0.1), NAME
+// connections come through the gateway's relay to ws://127.0.0.1:<port>/match?m=<match>&k=<seat token> or ?m=<match>&watch=1.
+// GET /status reports the load.
+// env: PORT (required), NAME; the instance is loopback-only behind the gateway
 import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { Match } from './game.mjs';
 import { installCrashLog, recordError, recentErrors } from './errors.mjs';
 
-const PORT = Number(process.env.PORT), HOST = process.env.HOST || '127.0.0.1', NAME = process.env.NAME || `instance-${PORT}`;
+const PORT = Number(process.env.PORT), HOST = '127.0.0.1', NAME = process.env.NAME || `instance-${PORT}`;
 const matches = new Map();
 let seq = 0;
 const log = (s) => console.log(`[${NAME}] ${s}`);
 installCrashLog(NAME);
 
-// a JSON body (≤ 1 MB: thirty seats with their own avatar pictures of ≤ 16 kB each)
+// a JSON body (≤ 2 MB: up to ninety seats with their own avatar pictures)
 function body(req) {
   return new Promise((res, rej) => {
-    let b = '';
-    req.on('data', (c) => { b += c; if (b.length > 1024 * 1024) { rej(new Error('too big')); req.destroy(); } });
+    let b = '', size = 0;
+    req.on('data', (c) => { size += c.length; b += c; if (size > 2 * 1024 * 1024) { rej(new Error('too big')); req.destroy(); } });
     req.on('end', () => { try { res(JSON.parse(b || '{}')); } catch (e) { rej(e); } });
   });
 }
@@ -30,7 +30,7 @@ const server = http.createServer(async (req, res) => {
       if (!fromLocal(req)) return json(res, 403, { error: 'local only' });
       const o = await body(req);
       const id = `${PORT}-${++seq}`;
-      const m = new Match({ id, mode: o.mode, humans: o.humans || [], npcFill: !!o.npcFill, log, onError: (e) => recordError(NAME, `match ${id}`, e) });
+      const m = new Match({ id, mode: o.mode, humans: o.humans || [], npcFill: !!o.npcFill, capacity: o.capacity, log, onError: (e) => recordError(NAME, `match ${id}`, e) });
       matches.set(id, m);
       // kept two minutes after the end: a seat whose connection dropped near the end can still fetch the standings
       m.run().then(() => setTimeout(() => matches.delete(id), 120000));
@@ -52,7 +52,7 @@ server.on('upgrade', (req, socket, head) => {
   const u = new URL(req.url, 'http://x');
   const m = u.pathname === '/match' && matches.get(u.searchParams.get('m'));
   if (!m) { socket.destroy(); return; }
-  const since = u.searchParams.has('since') ? Number(u.searchParams.get('since')) : null;
-  wss.handleUpgrade(req, socket, head, (ws) => m.attach(ws, u.searchParams.get('k'), since));
+  const watch = u.searchParams.get('watch') === '1';
+  wss.handleUpgrade(req, socket, head, (ws) => watch ? m.attachObserver(ws) : m.attach(ws, u.searchParams.get('k')));
 });
 server.listen(PORT, HOST, () => log(`listening on ${HOST}:${PORT}`));
