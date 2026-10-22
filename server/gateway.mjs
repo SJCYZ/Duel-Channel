@@ -288,7 +288,7 @@ function onMessage(s, m) {
     case 'room.create': {
       // (only rooms actually made count towards the minute's: a refused try costs nothing)
       if (s.net && LIMIT.roomCreatesPerMin && lastMinute(roomCreates, s.net).length >= LIMIT.roomCreatesPerMin) { logRefused(s.net, 'room creates per minute'); send(s, { t: 'error', msg: '创建房间过于频繁，请稍后再试' }); break; }
-      if (s.net && LIMIT.roomsPerNet && [...rooms.values()].filter((r) => r.host !== s && r.host.net === s.net).length >= LIMIT.roomsPerNet) {
+      if (s.net && LIMIT.roomsPerNet && [...rooms.values()].filter((r) => r.host && r.host !== s && r.host.net === s.net).length >= LIMIT.roomsPerNet) {
         logRefused(s.net, 'rooms per network'); send(s, { t: 'error', msg: '同一网络创建的房间已达上限，请先关闭其他房间' }); break;
       }
       if (LIMIT.rooms && rooms.size >= LIMIT.rooms && !(s.room && rooms.get(s.room) && rooms.get(s.room).host === s)) { logRefused('*', 'rooms in all'); send(s, { t: 'error', msg: '服务器房间已满，请稍后再试' }); break; }
@@ -322,7 +322,11 @@ function onMessage(s, m) {
       if (!r && !active) { joinFailed(who); send(s, { t: 'error', msg: '房间不存在或已无法加入' }); break; }
       if (active) {
         if (role !== 'spectator') { send(s, { t: 'error', msg: '比赛已开始，只能观战' }); break; }
-        send(s, { t: 'matched', role: 'spectator', port: active.port, matchId: active.matchId, code, mode: active.mode });
+        leaveQueue(s); leaveRoom(s);
+        const current = activeRoomMatches.get(code);
+        if (!current) { send(s, { t: 'error', msg: '房间不存在或已无法加入' }); break; }
+        s.room = null; s.state = 'idle'; s.role = null;
+        send(s, { t: 'matched', role: 'spectator', port: current.port, matchId: current.matchId, code, mode: current.mode });
         break;
       }
       if (role === 'player' && r.started) { send(s, { t: 'error', msg: '比赛已开始，只能观战' }); break; }
