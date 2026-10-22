@@ -59,17 +59,13 @@ function debugMark(on) {
     color: '#1d1d1d', background: '#f3d23a', pointerEvents: 'none', opacity: 0.9 });
   document.getElementById('stage').appendChild(el);
 }
-// A server connection with a message queue the flow reads in order (next / drain / take). With `retry` (seconds) a
-// connection that drops unexpectedly is reopened in the background with growing pauses until that time runs out:
-// waiting reads simply wait on, what the flow sends meanwhile that matters (bets, ready, watched, leave) goes out once
-// it is back, and `reopen` (the url to reconnect to, and what to send first) lets the match ask for what it missed
-// (since=<last seq>) and the lobby take its session back. The server's own closes (match over, seat taken, refused)
-// are final. onstate('reconnecting' | 'online' | 'lost') drives the waiting overlay.
+// A server connection with a message queue the flow reads in order (next / drain / take). Reopened match connections
+// receive a fresh hello snapshot; numbered broadcasts after it still use seq deduplication.
 const KEEP = ['bet', 'watched', 'ready', 'leave'];
 class Link {
   constructor(url, { retry = 0, reopen = null, onstate = () => {}, intercept = () => false } = {}) {
     this.url = url; this.q = []; this.waiters = []; this.closed = false; this.seq = 0; this.outbox = [];
-    this.retry = retry; this.reopen = reopen; this.onstate = onstate; this.intercept = intercept;
+    this.retry = retry; this.reopen = reopen; this.onstate = onstate; this.intercept = intercept; this.greeted = false;
     this.reconnecting = false; this.closing = false;
     this.ready = this.open(url);
   }
@@ -82,9 +78,14 @@ class Link {
   }
   receive(e) {
     let m; try { m = JSON.parse(e.data); } catch (err) { return; }
-    // numbered broadcasts: a reopened match connection replays what it missed (nothing twice); a replayed message is
-    // `age` ms old, so the flow's clocks (bet countdowns, the battle's start) count from when it was really sent
-    if (m.seq) { if (m.seq <= this.seq) return; this.seq = m.seq; }
+    // A reconnect greeting is a full snapshot, even when its seq matches the last broadcast seen by this link.
+    const greeting = m.t === 'hello';
+    if (m.seq && !greeting) { if (m.seq <= this.seq) return; this.seq = m.seq; }
+    else if (m.seq) this.seq = Math.max(this.seq, m.seq);
+    if (greeting) {
+      if (this.greeted) m.t = 'sync';
+      this.greeted = true;
+    }
     m._at = performance.now() - (m.age || 0);
     if (m.t === 'pong') { if (Number.isFinite(m.c)) PING.got(m._at - m.c); return; }
     if (m.t === 'emoji') { EMO.receive(m); return; }
@@ -116,6 +117,7 @@ class Link {
   }
   end() { this.closed = true; this.outbox.length = 0; for (const w of this.waiters.splice(0)) w.res({ t: 'closed' }); }
   send(o) {
+    if (this === NET.match && G.role === 'spectator' && o.t !== 'ping') return;
     if (this.ws.readyState === 1) this.ws.send(JSON.stringify(o));
     else if (this.reconnecting && KEEP.includes(o.t)) this.outbox.push(o);
   }
@@ -266,33 +268,42 @@ function applyServerPlayers(list) {
   }
   if (me) me.shieldHit = !!me.saved;
 }
-// a seat in a match: connect to its instance (through the gateway), take the seating. Dropped, the connection is
-// reopened for up to consts.maxRetryTimeInBattle seconds and the instance replays what was missed (since=<last seq>), so
-// the rounds go on where they were. The seat is also kept in sessionStorage: a reloaded page comes back to the match
-// (rejoinMatch).
+// a player or spectator connects through the gateway. Players keep a seat token; observers reconnect with their room code.
 const SEAT_KEY = 'duel.seat';
+const matchState = (current) => ({ wait: 'wait', show: 'show', loading: 'loading', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[current?.phase] || 'show');
+function applyMatchSnapshot(h) {
+  players = h.players.map((s) => serverPlayer(s, h.you));
+  G.role = h.role || G.role || 'player';
+  me = G.role === 'player' ? players.find((p) => p.me) : null;
+  G.current = h.current;
+  G.currentAt = performance.now();
+  G.matchOver = h.current?.phase === 'finish';
+  for (const [id, ch] of Object.entries(h.current?.publicChoices || {})) { const p = players.find((x) => x.id === id); if (p) p.choice = ch; }
+  if (me && h.current?.ownChoice) me.choice = h.current.ownChoice;
+  G.mode = MODES.find((x) => x.id === h.mode) || G.mode;
+}
 async function joinMatch(m) {
   if (NET.match) NET.match.close();
-  // the match is on the node of its room (a seat kept from a reload names it)
+  const role = m.role === 'spectator' ? 'spectator' : 'player';
+  // the match is on the node of its room (a seat or room code names it)
   if (m.host && nodeHost(m.host)) WS_HOST = m.host;
-  const url = `${wsBase()}/match?port=${encodeURIComponent(m.port)}&m=${encodeURIComponent(m.matchId)}&k=${encodeURIComponent(m.token)}`;
+  const url = `${wsBase()}/match?port=${encodeURIComponent(m.port)}&m=${encodeURIComponent(m.matchId)}&${role === 'spectator' ? `code=${encodeURIComponent(m.code)}` : `k=${encodeURIComponent(m.token)}`}`;
   NET.match = new Link(url, {
     retry: C.maxRetryTimeInBattle || 30, onstate: (st) => RECONNECT.state(st),
-    reopen: (link) => ({ url: `${url}&since=${link.seq}` }),
-    // the instance greets a reopened connection again: the flow already has the seating
-    intercept: (msg) => msg.t === 'hello' && msg.resumed,
+    reopen: (link) => ({ url: role === 'spectator' ? url : `${url}&since=${link.seq}` }),
   });
   await NET.match.ready;
   const h = await NET.match.next('hello', 8000);
   if (h.t !== 'hello') throw new Error('对战实例没有响应');
-  players = h.players.map((s) => serverPlayer(s, h.you));
-  me = players.find((p) => p.me);
+  applyMatchSnapshot(h);
+  G.role = role;
+  if (role === 'spectator') forgetSeat();
   G.online = true;
   G.debugMatch = !!h.debug; debugMark(G.debugMatch);
   if (G.debugMatch) { if (PAGE_DEBUG) console.info('debug match: seeds come with the line-ups'); else toast('这是一场调试模式的对局：服务器在押注前就公开了种子', 4); }
   G.mode = MODES.find((x) => x.id === h.mode) || G.mode;
   G.matchId = m.matchId;
-  try { sessionStorage.setItem(SEAT_KEY, JSON.stringify({ port: m.port, matchId: m.matchId, token: m.token, ...(WS_HOST !== location.host ? { host: WS_HOST } : {}) })); } catch (e) { /* no storage */ }
+  if (role === 'player') try { sessionStorage.setItem(SEAT_KEY, JSON.stringify({ port: m.port, matchId: m.matchId, token: m.token, ...(WS_HOST !== location.host ? { host: WS_HOST } : {}) })); } catch (e) { /* no storage */ }
   return h;
 }
 const forgetSeat = () => { debugMark(false); try { sessionStorage.removeItem(SEAT_KEY); } catch (e) { /* no storage */ } };
@@ -305,7 +316,7 @@ async function rejoinMatch() {
   try {
     const h = await joinMatch(seat);
     toast('已回到比赛');
-    return ['wait', 'show', 'loading'].includes(h.phase) ? 'show' : 'game';
+    return matchState(h.current);
   } catch (e) {
     forgetSeat();
     if (NET.match) { NET.match.close(); NET.match = null; }
@@ -440,7 +451,7 @@ async function stRoomOnline(ctx) {
       if (!nodeHost(m.host)) { toast('这个房间在另一台服务器上，请从游戏入口页进入后再加入', 4); result = 'back'; continue; }
       try { await moveLobby(m.host); NET.lobby.send({ t: 'room.join', code: m.code, role: joinRole || 'player' }); joined = true; } catch (e) { toast('无法连接房间所在的服务器', 3); result = 'back'; }
     }
-    else if (m.t === 'matched') { try { await joinMatch(m); result = 'show'; } catch (e) { toast(e.message, 3); } }
+    else if (m.t === 'matched') { try { await joinMatch(m); result = matchState(G.current); } catch (e) { toast(e.message, 3); } }
     else if (m.t === 'error') { toast(m.msg, 3); if (!room) result = 'back'; }
     else if (m.t === 'closed') { toast('与大厅的连接已断开', 3); result = 'back'; }
   }
@@ -497,27 +508,65 @@ async function stGameOnline() {
   const stand = standMode();
   G.log = []; G.matchOver = false;
   EMO.begin();
+  let current = G.current;
+  G.current = null;
   for (;;) {
-    const m = await NET.match.next(['round', 'finish']);
-    if (m.t !== 'round') { if (m.t === 'finish') { applyServerPlayers(m.players); G.matchOver = true; forgetSeat(); } else toast('与对战实例的连接已断开', 3); break; }
+    let m;
+    if (current?.phase === 'finish') { G.matchOver = true; forgetSeat(); break; }
+    if (current?.phase === 'result') {
+      const result = { t: 'result', ...current.result };
+      applyServerPlayers(result.players);
+      G.serverResult = result;
+      const r = result.r;
+      G.round = r;
+      await roundEnd(r, result.w);
+      const leaveResult = stand ? await standBoard(r, players, { last: standOver(players) || r >= STAND.cap }) : await scoreboard(r);
+      if (leaveResult) { if (G.role !== 'spectator') { NET.match.send({ t: 'leave' }); forgetSeat(); } left = true; break; }
+      current = null;
+      continue;
+    } else if (current?.round && ['bet', 'battle'].includes(current.phase)) {
+      m = { ...current.round, ...(current.phase === 'battle' ? { seed: current.seed, salt: current.salt, choices: current.publicChoices } : {}) };
+    } else {
+      m = await NET.match.next(['round', 'finish', 'sync']);
+      if (m.t === 'sync') { applyMatchSnapshot(m); current = G.current; G.current = null; continue; }
+      if (m.t !== 'round') { if (m.t === 'finish') { applyServerPlayers(m.players); G.matchOver = true; forgetSeat(); } else toast('与对战实例的连接已断开', 3); break; }
+    }
     const rd = DCFG.rounds[m.roundId], r = m.r;
     G.round = r;
     // 竞猜对决: past round 5 nobody holds a shield (the instance does the same; its next snapshot says so)
-    if (stand) standShields(players, r);
+    if (stand && !current) standShields(players, r);
     const lineups = m.lineups.map((s) => s.map(([k, n]) => ({ f: byKey(k), n })));
     const traps = Array.isArray(m.traps) ? m.traps : [];
     G.log.push({ r, seed: m.seed, lineups: lineups.map((x) => x.map((g) => `${g.f.name}×${g.n}`).join(' + ')), traps, cost: lineups.map(sideScore), len: 0 });
     // the battle's seed comes as the bets close (a debug match sends it now): the line-up stands on a stand-in world
-    setupRound(lineups, m.seed ?? null, traps);
-    G.serverResult = null; G.battleAt = 0; G.battleSeed = null; G.battleSalt = null;
-    await betPhase(r, rd, lineups, null, { betMs: m.betMs, secretMs: m.secretMs, at: m._at });
+    const startPhase = current?.phase || 'bet';
+    const battleSnapshot = startPhase === 'battle' ? current : null;
+    const battleSeed = startPhase === 'battle' ? current.seed : m.seed;
+    setupRound(lineups, battleSeed ?? null, traps, !current);
+    G.serverResult = null;
+    if (startPhase === 'battle') {
+      for (const [id, ch] of Object.entries(current.publicChoices || {})) { const p = players.find((x) => x.id === id); if (p) p.choice = ch; }
+      if (me) me.choice = current.publicChoices?.[me.id] || null;
+      G.battleSeed = current.seed; G.battleSalt = current.salt; G.battleAt = performance.now() - (current.elapsedMs || 0);
+      reseedRound(current.seed);
+    } else if (startPhase === 'bet') {
+      G.serverResult = null; G.battleAt = 0; G.battleSeed = null; G.battleSalt = null;
+      const elapsedMs = current ? Math.max(0, (current.elapsedMs || 0) + performance.now() - (G.currentAt || performance.now())) : 0;
+      const params = current ? { ...current, elapsedMs, at: performance.now() - elapsedMs, spectator: G.role === 'spectator', snapshot: true } : { betMs: m.betMs, secretMs: m.secretMs, at: m._at };
+      if (current) { params.ownChoice = current.ownChoice; params.secret = current.secret; params.publicChoices = current.publicChoices; }
+      const synced = await betPhase(r, rd, lineups, null, params);
+      current = null;
+      if (synced === 'sync') { current = G.current; G.current = null; continue; }
+    }
     if (Number.isInteger(G.battleSeed)) {
       // the seed and salt against the round's opening commitment
       if (m.commit && sha256hex(`${G.battleSeed}:${G.battleSalt}`) !== m.commit) { console.warn('round seed does not match its commitment', r); toast('本轮种子与开局承诺不符', 4); }
       G.log[G.log.length - 1].seed = G.battleSeed;
       reseedRound(G.battleSeed);
     }
-    const w = await battlePhase(r, true);
+    const w = await battlePhase(r, true, battleSnapshot ? { ...battleSnapshot, at: G.currentAt } : null);
+    current = null;
+    if (w === 'sync') { current = G.current; G.current = null; continue; }
     const res = G.serverResult;
     if (!res || res.t !== 'result') { if (res && res.t === 'finish') { applyServerPlayers(res.players); G.matchOver = true; forgetSeat(); } break; }
     if (w !== res.w) console.warn('the replay differs from the server', r, w, res.w);
@@ -526,7 +575,7 @@ async function stGameOnline() {
     await roundEnd(r, res.w);
     // 竞猜对决's board; its last one when the standings say the match is over (one viewer left, or no human)
     left = stand ? await standBoard(r, players, { last: standOver(players) || r >= STAND.cap }) : await scoreboard(r);
-    if (left) { NET.match.send({ t: 'leave' }); forgetSeat(); break; }
+    if (left) { if (G.role !== 'spectator') { NET.match.send({ t: 'leave' }); forgetSeat(); } break; }
   }
   EMO.end();
   G.left = left;

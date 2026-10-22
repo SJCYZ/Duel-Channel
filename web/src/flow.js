@@ -31,7 +31,7 @@ let ME_NAME = '博士', ME_TAG = '#' + (1000 + Math.floor(Math.random() * 9000))
 let players = [], me = null;
 // records: each mode card's own (modeRecordDesc), by mode id — 礼物对决 / 自娱自乐's 最高礼物赢取 (the most gifts at a
 // match's end), 竞猜对决's 最佳竞猜排名 (the best place reached); none yet: absent
-const G = { round: 0, mode: MODES_MATCH.find((m) => m.id === 'multiOperationMatch'), log: [], records: {} };
+const G = { round: 0, mode: MODES_MATCH.find((m) => m.id === 'multiOperationMatch'), log: [], records: {}, role: 'player', current: null };
 const standMode = () => isStand(G.mode.id);
 
 function newPlayers() {
@@ -525,6 +525,20 @@ async function stRoom(ctx) {
 }
 
 // ---- 4 STARTING SOON -----------------------------------------------------------------------------------------------
+const currentElapsedMs = (current) => Math.max(0, (current?.elapsedMs || 0) + (G.currentAt ? performance.now() - G.currentAt : 0));
+async function stWait() {
+  phase('等待其他玩家连接');
+  for (;;) {
+    const m = await NET.match.next(['phase', 'sync', 'finish']);
+    if (m.t === 'sync') {
+      applyMatchSnapshot(m);
+      return ({ wait: 'wait', show: 'show', loading: 'loading', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[m.current?.phase] || 'show');
+    }
+    if (m.t === 'finish') { G.matchOver = true; return 'finish'; }
+    if (m.name === 'show') return 'show';
+    if (m.name === 'loading') return 'loading';
+  }
+}
 async function stShow(ctx) {
   phase('即将开始');
   const scr = new Screen('enemy_duel_entrance_show_dialog', { z: 30 });
@@ -546,9 +560,12 @@ async function stShow(ctx) {
   });
   playLoops(scr);
   sfx('g_ui_dqstartsign');
-  await scr.play('view', 'start_in_10');
-  await wait(1.0);
-  await scr.play('view', 'start_out');
+  const elapsed = G.current?.phase === 'show' ? currentElapsedMs(G.current) : 0;
+  if (elapsed < 9000) {
+    await scr.play('view', 'start_in_10');
+    await wait(Math.max(0, 1 - elapsed / 1000));
+    await scr.play('view', 'start_out');
+  }
   ctx.pending = () => scr.close();
   return 'loading';
 }
@@ -562,14 +579,15 @@ async function stLoading(ctx) {
   scr.text('panel_text/text_stage_name', `${G.mode.name} · ${C.matchTabText || '直播主赛场'}`);
   playLoops(scr);
   // the models load when a round's line-up is drawn (the bet window gives them time); here only the screen's own pace
-  await wait(2.2);
+  const elapsed = G.current?.phase === 'loading' ? currentElapsedMs(G.current) : 0;
+  await wait(Math.max(0, 2.2 - elapsed / 1000));
   if (G.online) {
-    NET.match.send({ t: 'ready' });
+    if (G.role !== 'spectator') NET.match.send({ t: 'ready' });
     const m = await NET.match.next(['round', 'finish']);
     NET.match.q.unshift(m);
   }
   scr.text('panel_text/text_tip', '全部玩家已完成加载');
-  await wait(0.5);
+  await wait(Math.max(0, 0.5 - Math.max(0, elapsed / 1000 - 2.2)));
   await fadeOut(scr);
   return 'game';
 }
@@ -660,11 +678,12 @@ function topBar(scr, holder, r) {
   scr.text('group_topleft/text_title', `${G.mode.name} · 第 ${r} 轮`, top);
   watchPing(scr, 'panel_lag/text_num', top);
   scr.tap('group_topleft/btn_back/hotspot', () => toast('比赛进行中，可在计分板“离开比赛”'), top);
-  EMO.bar(scr, top);
+  if (G.role !== 'spectator') EMO.bar(scr, top);
   return top;
 }
 async function betPhase(r, rd, lineups, winner, net = null) {
   phase(`第 ${r} 轮 · 押注（选择支持的队伍）`);
+  const spectator = G.role === 'spectator';
   const stake = rd.roundScore, solo = !net && isSolo(), stand = standMode();
   const BET_TIME = net ? net.betMs / 1000 : solo ? (C.modeSoloOperationSelectTime || 300) : ((stand ? C.modeStandSelectTime : C.modeOperationSelectTime) || 20);
   const RED = (stand ? C.modeStandSelectTimeLast : C.modeOperationSelectTimeLast) || 7;
@@ -685,9 +704,9 @@ async function betPhase(r, rd, lineups, winner, net = null) {
   // the alarm clock rings only in the window's last seconds (with the red countdown): hidden until then
   scr.show('panel_contdown_middle/group_clock', false);
   scr.text('turn_info/text_turn', pad2(r));
-  scr.text('panel_assets/text_assets', String(me.pts).padStart(8, '0'));
-  scr.text('panel_rank/content/text_rank', String(rankOf(me)));
-  const out = me.out;
+  scr.text('panel_assets/text_assets', me ? String(me.pts).padStart(8, '0') : '');
+  if (me) scr.text('panel_rank/content/text_rank', String(rankOf(me)));
+  const out = !!me?.out;
   // 竞猜对决: the players still in instead of the gifts, the two 支持这边 buttons, and the 观众保护 line — held: the
   // rounds it still covers; taken: 观众保护系统已失效; past round 5: 所有人不再拥有观众保护！ (which of the three shows
   // when is read from their wording)
@@ -696,11 +715,11 @@ async function betPhase(r, rd, lineups, winner, net = null) {
   if (stand) {
     scr.text('pnl_player_num/text_least', String(players.filter((p) => !p.out).length));
     scr.text('pnl_player_num/text_playernum', '/' + players.length);
-    const turn = C.modeStandShieldTurn ?? 5, kind = r > turn ? 'allfall' : me.shield ? 'protect' : 'disable';
+    const turn = C.modeStandShieldTurn ?? 5, kind = r > turn ? 'allfall' : me?.shield ? 'protect' : 'disable';
     for (const k of ['protect', 'disable', 'allfall']) scr.show(`group_tips/panel_protect${k === 'protect' ? '' : '_' + k}`, k === kind);
     if (kind === 'protect') scr.text('panel_protect/layout_max/layout_min/text_info', `${turn - r + 1}轮内可免受一次淘汰惩罚`);
   }
-  const short = me.pts < stake, canAll = rd.canAllIn || short;
+  const short = !!me && me.pts < stake, canAll = rd.canAllIn || short;
   for (const side of ['left_btn', 'right_btn']) {
     scr.show(`${side}/btn_ex_bet/btn_assets_notenough`, short);
     scr.show(`${side}/btn_ex_bet/btn_bet`, !short);
@@ -708,12 +727,12 @@ async function betPhase(r, rd, lineups, winner, net = null) {
     scr.text(`${side}/btn_ex_bet/btn_bet/btn_info/num_layout_max/layout_min/text_num`, fmtW(stake));
     scr.text(`${side}/btn_ex_bet/btn_assets_notenough/btn_info/num_layout_max/layout_min/text_num`, fmtW(stake));
   }
-  scr.show('group_bet_btn', !out && !stand); scr.show('pnl_skip', !out && rd.canSkip); scr.show('panel_contdown_middle/group_out', out);
-  scr.show('group_bet_btn_turn', !out && stand);
+  scr.show('group_bet_btn', !spectator && !out && !stand); scr.show('pnl_skip', !spectator && !out && rd.canSkip); scr.show('panel_contdown_middle/group_out', out);
+  scr.show('group_bet_btn_turn', !spectator && !out && stand);
   for (const side of ['left_btn', 'right_btn']) scr.show(`group_bet_btn_turn/${side}/btn_normal_bet`, stand);
   // the official tips: 竞猜对决 gets those about its 观众保护 and the ones not about gifts; 礼物对决 all but those
   const tips = DCFG.tips.filter((x) => (stand ? !/礼物|赠|全投|观望/.test(x) : !/观众保护|竞猜对决/.test(x))), tip = tips[Math.floor(Math.random() * tips.length)];
-  scr.text('panel_contdown_middle/text_info', out ? '你已被淘汰，正在观战……' : solo ? '选择后即开赛 · ' + tip : tip);
+  scr.text('panel_contdown_middle/text_info', spectator ? '只读观战 · 选择支持的队伍' : out ? '你已被淘汰，正在观战……' : solo ? '选择后即开赛 · ' + tip : tip);
   lineupRow(scr, 0, lineups[0]); lineupRow(scr, 1, lineups[1]);
   topBar(scr, 'manager_mode_view/top_menu_holder', r);
   scr.show('group_staff_info_left/panel_info', false); scr.show('group_staff_info_right/panel_info', false);
@@ -739,12 +758,14 @@ async function betPhase(r, rd, lineups, winner, net = null) {
     scr.tap(`${side}/panel_info/main/staff_info_top/hotspot`, toggle);
   }
   playLoops(scr, scr.root, /countdown_red|clock_loop/);
-  scr.play('manager_mode_view', 'battle_ui_bet_in');
-  // the round number's boom and fire
-  scr.show('group_turn/ui_particle_boom', true);
-  wait(0.8).then(() => { if (!scr.dead) scr.show('group_turn/ui_particle_boom', false); });
+  if (!net?.snapshot) {
+    scr.play('manager_mode_view', 'battle_ui_bet_in');
+    // the round number's boom and fire
+    scr.show('group_turn/ui_particle_boom', true);
+    wait(0.8).then(() => { if (!scr.dead) scr.show('group_turn/ui_particle_boom', false); });
+  }
   const refresh = () => {
-    const c = me.choice;
+    const c = me?.choice || net?.ownChoice || null;
     if (stand) {
       for (const [i, side] of [[0, 'left_btn'], [1, 'right_btn']]) {
         scr.show(`group_bet_btn_turn/${side}/btn_normal_bet/select`, !!c && c.side === i);
@@ -766,6 +787,7 @@ async function betPhase(r, rd, lineups, winner, net = null) {
     fillLists(scr, 'container', 'text_num');
   };
   const choose = (ch) => {
+    if (!me || spectator) return;
     if (stand) {
       if (me.out) return;
       me.choice = { side: ch.side };
@@ -801,6 +823,7 @@ async function betPhase(r, rd, lineups, winner, net = null) {
   // the window's last seconds are secret (the official 暗选: 下注时间即将结束……确定你的抉择！): the supporters' lists
   // fold away and picks made now show only as the bets close (online the instance holds them back)
   let secret = false, seen = null;
+  for (const [id, ch] of Object.entries(net?.publicChoices || {})) { const p = players.find((x) => x.id === id); if (p) p.choice = ch; }
   const list = scr.one('manager_mode_view/panel_list');
   const goSecret = () => {
     if (secret || out) return;
@@ -810,8 +833,10 @@ async function betPhase(r, rd, lineups, winner, net = null) {
     tipLines();
     if (list) list.alpha = 0;
   };
-  let t = 0, red = false, lastTick = 0;
+  if (net?.secret) goSecret();
+  let t = net ? (performance.now() - net.at) / 1000 : 0, red = false, lastTick = 0;
   const handle = scr.one('slidingarea/handle'), t0 = net && net.at ? net.at : performance.now();
+  if (handle && net) handle.rt.amin[0] = handle.rt.amax[0] = clamp(t / BET_TIME, 0, 1);
   while (net ? !net.final : t < BET_TIME) {
     if (solo && (me.choice || me.out) && t >= W8) break;
     await wait(0.1);
@@ -825,6 +850,8 @@ async function betPhase(r, rd, lineups, winner, net = null) {
       const fin = NET.match.take('battle');
       // the bets closed: every pick, and the battle's seed (with its salt, for the commitment)
       if (fin) { for (const p of players) p.choice = fin.choices[p.id] || null; net.final = true; upd = true; G.battleAt = fin._at; G.battleSeed = fin.seed; G.battleSalt = fin.salt; }
+      const sync = NET.match.take('sync');
+      if (sync) { applyMatchSnapshot(sync); scr.close(); return 'sync'; }
       if (NET.match.closed || t > BET_TIME + 15) net.final = true;
       if (upd) refresh();
     } else t += 0.1;
@@ -843,7 +870,7 @@ async function betPhase(r, rd, lineups, winner, net = null) {
   }
   for (const x of npcs) if (!x.done) x.p.choice = npcDecide(x.p, rd, lineups, winner, seen);
   // undecided when the time is up: 观望 where the round allows it, else a side at random (竞猜对决: a side at random)
-  if (!net && !me.out && !me.choice) {
+  if (!net && me && !me.out && !me.choice) {
     me.choice = stand ? { side: Math.random() < 0.5 ? 0 : 1 } : rd.canSkip ? { skip: true } : { side: Math.random() < 0.5 ? 0 : 1, kind: short ? 'all' : 'normal', forced: short };
   }
   refresh();
@@ -858,7 +885,7 @@ async function betPhase(r, rd, lineups, winner, net = null) {
   await wait(0.6);
   await fadeOut(scr, 0.3);
 }
-async function battlePhase(r, online = false) {
+async function battlePhase(r, online = false, current = null) {
   phase(`第 ${r} 轮 · 比赛中`);
   const scr = new Screen('battle_state', { z: 20 });
   scr.show('panel_waiting', false);
@@ -867,7 +894,7 @@ async function battlePhase(r, online = false) {
   scr.show('panel_round/pnl_allround', !standMode());
   topBar(scr, 'root/top_container', r);
   fillLists(scr, 'content', 'text');
-  const c = me.choice;
+  const c = me?.choice || null;
   scr.show('root/panel_battle_holder/group_support', !!(c && !c.skip));
   if (c && !c.skip) {
     scr.text('panel_battle_holder/group_support/layout_max/layout_min/text', `你${c.kind === 'all' ? '全力' : ''}支持了${c.side ? '右侧（蓝）' : '左侧（红）'}队伍`);
@@ -875,22 +902,43 @@ async function battlePhase(r, online = false) {
     for (const f of scr.q('panel_battle_holder/group_support/layout_max/layout_min/support_finger')) f.rt.scale[0] = c.side ? -1 : 1;
   }
   playLoops(scr);
-  scr.play('root', 'battle_ui_battle_in');
-  sfx('b_ui_dqstartbanner');
-  await scr.play('enemyduel_round_start', 'battle_ui_round_start_in');
-  await wait(0.4);
-  scr.show('enemyduel_round_start', false);
+  if (current) scr.show('enemyduel_round_start', false);
+  else {
+    scr.play('root', 'battle_ui_battle_in');
+    sfx('b_ui_dqstartbanner');
+    await scr.play('enemyduel_round_start', 'battle_ui_round_start_in');
+    await wait(0.4);
+    scr.show('enemyduel_round_start', false);
+  }
   let result;
   if (online) {
-    // the instance waits for every viewer; if its result comes first (a slower viewer timed out), catch up
-    const done = startBattle();
-    // a battle that began well before this replay (the connection came back, or the page was reloaded) catches up
-    if (G.battleAt && performance.now() - G.battleAt > 6000) arena.ff = 8;
-    const res = NET.match.next(['result', 'finish']).then((m) => { G.serverResult = m; if (arena.running) arena.ff = 40; return m; });
-    result = await done;
-    NET.match.send({ t: 'watched' });
+    // Start at the server's current time when joining during a battle; seekTo suppresses all past visual events.
+    if (current) seekTo((current.elapsedMs || 0) + Math.max(0, performance.now() - (current.at || performance.now())));
+    const done = startBattle(!!current);
+    const incoming = NET.match.next(['result', 'finish', 'sync']);
+    const first = await Promise.race([done.then((w) => ({ t: 'sim', w })), incoming]);
+    if (first.t === 'sync') {
+      arena.running = false;
+      if (arena.onEnd) { const end = arena.onEnd; arena.onEnd = null; end(null); }
+      scr.close(); applyMatchSnapshot(first); return 'sync';
+    }
+    let serverMessage = first.t === 'sim' ? null : first;
+    if (first.t === 'result' || first.t === 'finish') {
+      G.serverResult = first;
+      arena.running = false;
+      if (arena.onEnd) { const end = arena.onEnd; arena.onEnd = null; end(null); }
+      result = first.w;
+    } else {
+      result = first.w;
+      if (G.role !== 'spectator') NET.match.send({ t: 'watched' });
+    }
     if (!G.serverResult) { scr.show('panel_waiting', true); phase(`第 ${r} 轮 · 正在等待其他玩家结束观赛……`); }
-    await res;
+    if (!G.serverResult) {
+      const later = serverMessage || await incoming;
+      if (later.t === 'sync') { scr.close(); applyMatchSnapshot(later); return 'sync'; }
+      G.serverResult = later;
+    }
+    if (G.serverResult.t === 'result') result = G.serverResult.w;
     scr.show('panel_waiting', false);
   } else {
     // offline the NPC viewers react during the fight and to its outcome (online the instance sends theirs)
@@ -912,6 +960,12 @@ function standRankAll() { const rk = standRanks(players); for (const p of player
 async function roundEnd(r, w) {
   const scr = new Screen('round_end_state', { z: 22 });
   scr.show('group_left_win', w === 0); scr.show('group_right_win', w === 1); scr.show('group_draw', w === 'draw');
+  if (G.role === 'spectator') {
+    scr.show('group_state/sorry', true);
+    scr.text('sorry_lower/text_tie_game', '本轮比赛结果');
+    phase(`第 ${r} 轮 · ${w === 'draw' ? '平局' : w === 0 ? '左队（红）胜' : '右队（蓝）胜'}`);
+    await wait(2.2); scr.close(); return;
+  }
   const c = me.choice, played = c && !c.skip && !(me.out && me.outRound < r);
   const all = played && c.kind === 'all';
   scr.show('group_state/right', played && me.right);
@@ -979,10 +1033,12 @@ async function scoreboard(r) {
   scr.play('panel_round_rank', 'scoreboard_enter');
   let leave = false;
   const confirm = scr.one('panel_second_confirm');
-  scr.tap('group_bottom/btn_exit/hotspot', () => { confirm.active = true; scr.play('panel_second_confirm', 'second_confirm_window_switch'); });
+  if (G.role !== 'spectator') scr.tap('group_bottom/btn_exit/hotspot', () => { confirm.active = true; scr.play('panel_second_confirm', 'second_confirm_window_switch'); });
   scr.text('confirm_again/bg/text_state', '确定要离开比赛吗？');
-  scr.tap('confirm_again/btn_cancel/hotspot', () => { scr.play('panel_second_confirm', 'second_confirm_window_switch', { reverse: true }).then(() => { confirm.active = false; }); });
-  scr.tap('confirm_again/btn_confirm/hotspot', () => { leave = true; });
+  if (G.role !== 'spectator') {
+    scr.tap('confirm_again/btn_cancel/hotspot', () => { scr.play('panel_second_confirm', 'second_confirm_window_switch', { reverse: true }).then(() => { confirm.active = false; }); });
+    scr.tap('confirm_again/btn_confirm/hotspot', () => { leave = true; });
+  } else scr.show('group_bottom/btn_exit', false);
   scr.text('btn_exit/text_layout/text_exit', '离开比赛');
   let n = isSolo() ? (C.modeSoloOperationRankTime || 3) : (C.modeOperationRankTime || 8);
   while (n > 0 && !leave) {
@@ -1048,9 +1104,11 @@ async function standBoard(r, list, { last = false, seats = list.length } = {}) {
   const popup = scr.one('popup_window');
   popup.active = false;
   scr.text('popup/bg/text_info', '确定要离开比赛吗？');
-  scr.tap('btn_leavegame/hotspot', () => { popup.active = true; scr.play('popup', 'enemyduel_turn_settlement_popup_in'); });
-  scr.tap('popup/btn_no/hotspot', () => { popup.active = false; });
-  scr.tap('popup/btn_yes/hotspot', () => { leave = true; });
+  if (G.role !== 'spectator') {
+    scr.tap('btn_leavegame/hotspot', () => { popup.active = true; scr.play('popup', 'enemyduel_turn_settlement_popup_in'); });
+    scr.tap('popup/btn_no/hotspot', () => { popup.active = false; });
+    scr.tap('popup/btn_yes/hotspot', () => { leave = true; });
+  } else scr.show('btn_leavegame', false);
   let n = C.modeStandRankTime || 8;
   while (n > 0 && !leave) {
     scr.text('group_countdown/text_count', String(n));
@@ -1145,6 +1203,30 @@ async function stFinish() {
   phase('最终结算');
   let scr;
   await wipe(async () => { clearArena(); scr = new Screen('enemy_duel_battle_finish_view', { z: 40 }); }, '比赛结束');
+  if (G.role === 'spectator') {
+    const order = standMode() ? players.slice().sort((a, b) => (a.rank || 999) - (b.rank || 999)) : ranked();
+    const content = scr.one('rank_list/scroll_list/viewport/content');
+    clearKids(content);
+    const items = order.map((p, i) => {
+      const it = instantiate(scr, content, 'enemy_duel_battle_finish_rank_item');
+      scr.show('no_info', false, it); scr.show('normal_info', true, it); scr.show('mine', false, it);
+      scr.text('normal_info/text_name', p.name, it); scr.text('normal_info/text_id', p.tag, it);
+      scr.text('normal_info/text_num', standMode() ? String(p.pass) : fmt(p.pts), it);
+      scr.text('normal_info/text_rank', String(standMode() ? p.rank : i + 1), it);
+      scr.show('icon_toggle/icon_stand', standMode(), it); scr.show('icon_toggle/icon_op', !standMode(), it);
+      scr.image('npc/img_avatar', p.avatar, it); return it;
+    });
+    stack(items, 81, 6);
+    scr.text('title_part/text_title', '比赛结束');
+    scr.show('btn_next/panel_continue', false); scr.show('btn_next/panel_room', false);
+    scr.show('group_down/group_1_btn', false); scr.show('group_down/group_2_btn', false);
+    playLoops(scr); scr.play('panel', 'panel_enemyduel_settlement_in');
+    phase('比赛结束 · 只读观战');
+    await wait(5000); scr.close();
+    if (NET.match) { NET.match.close(); NET.match = null; }
+    if (WS_HOST !== location.host) { try { await moveLobby(location.host); } catch (e) { toast('与大厅的连接已断开', 3); } }
+    return 'entry';
+  }
   const stand = standMode();
   if (stand && !G.online) standRankAll();
   // 竞猜对决: by the standings (equal ones share a rank); 礼物对决: by gifts
@@ -1255,7 +1337,7 @@ function onTrackChange(title) {
   for (const b of $('tracks').children) b.setAttribute('aria-pressed', String(!!SND.bgm && b.dataset.k === SND.bgm.key));
   $('trackName').textContent = title ? `正在播放：${title}` : '';
 }
-const STATES = { entry: stEntry, prepare: stPrepare, show: stShow, loading: stLoading, finish: stFinish,
+const STATES = { entry: stEntry, prepare: stPrepare, wait: stWait, show: stShow, loading: stLoading, finish: stFinish,
   match: (ctx) => (NET.on ? stMatchOnline(ctx) : stMatch(ctx)), room: (ctx) => (NET.on ? stRoomOnline(ctx) : stRoom(ctx)),
   game: (ctx) => (G.online ? stGameOnline(ctx) : stGame(ctx)) };
 // ---- the settings gear: the demo's controls and the viewer's avatar, behind one button in the window's corner -------

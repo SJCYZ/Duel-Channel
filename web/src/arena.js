@@ -1530,12 +1530,12 @@ function bossPanel(W, dt) {
 // ---- the visible arena: the sim's world (sim.js) with Spine views --------------------------------------------------------
 // seed null (online, the bets still open): a stand-in world shows the line-up until the battle's seed comes (reseedRound);
 // traps: the round's field traps (makeTraps), known before the bets like the line-up
-function setupRound(lineups, seed, traps) {
+function setupRound(lineups, seed, traps, enter = true) {
   clearArena();
   arena.lineups = lineups; arena.traps = traps || []; arena.standIn = seed == null;
   arena.W = makeWorld(lineups, seed ?? 0, true, arena.traps);
   // a giant makes its entrance as the line-up comes on
-  for (const u of arena.W.units) attachView(u, u.giant);
+  for (const u of arena.W.units) attachView(u, enter && u.giant);
   arena.acc = 0; arena.ff = 1; arena.running = false;
   // 竞猜对决 has no last round: the round alone
   const stand = typeof G !== 'undefined' && G.mode && G.mode.key === 'stand';
@@ -1571,10 +1571,33 @@ function clearArena() {
   arena.flashT = 0;
   drawRing(0);
 }
-function startBattle() {
+function startBattle(resume = false) {
+  if (arena.W && arena.W.done) return Promise.resolve(arena.W.result);
   arena.running = true;
-  if (arena.W) for (const u of arena.W.units) fxSpawn(u);
+  if (!resume && arena.W) for (const u of arena.W.units) fxSpawn(u);
   return new Promise((res) => { arena.onEnd = res; });
+}
+function seekTo(elapsedMs) {
+  const W = arena.W;
+  if (!W) return;
+  const target = Math.max(0, elapsedMs / 1000);
+  arena.running = false;
+  arena.acc = 0;
+  arena.ff = 1;
+  while (!W.done && W.t + 1e-9 < target) {
+    simStep(W);
+    W.events.length = 0;
+  }
+  W.events.length = 0;
+  arena.t = W.t;
+  FX.clear();
+  efxClear();
+  for (const u of W.units) {
+    attachView(u, false);
+    u.seenAttack = u.attackSeq;
+    u.seenSkill = u.skillSeq;
+  }
+  drawRing();
 }
 // enter: the unit comes on now (a giant with the line-up, a summon or a drop-in in the battle) — its entrance clip
 // (Start), or a giant without one fades in
