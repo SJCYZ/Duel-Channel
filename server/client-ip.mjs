@@ -37,9 +37,11 @@ function normalizeIp(ip) {
   return ip;
 }
 
-function isTrustedProxyIp(ip) {
-  const family = isIP(ip) === 4 ? 'ipv4' : 'ipv6';
-  return trustedProxyPeers.check(ip, family);
+export function isTrustedProxyIp(ip) {
+  const normalized = normalizeIp(ip ?? '');
+  if (!normalized) return false;
+  const family = isIP(normalized) === 4 ? 'ipv4' : 'ipv6';
+  return trustedProxyPeers.check(normalized, family);
 }
 
 export function resolveClientIp(req, trustProxy) {

@@ -76,13 +76,19 @@ test('the served page: encodings, validators, the immutable pack, only the build
   try { assert.equal((await get(gw3.port, '/')).status, 503); } finally { gw3.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('public edge: /status is loopback-only with TRUST_PROXY while /healthz stays public', async () => {
+test('public edge: /status accepts local and Tailscale Serve requests while /healthz stays public', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'duel-pub-'));
   const gw = await gateway(dir, join(dir, 'logs'), { TRUST_PROXY: '1' });
   try {
     const remote = await get(gw.port, '/status', { 'X-Forwarded-For': '203.0.113.8' });
     assert.equal(remote.status, 404);
     assert.equal(remote.body.length, 0);
+    const tailscale = await get(gw.port, '/status', {
+      'X-Forwarded-For': '100.101.102.103',
+      'Tailscale-User-Login': 'alice@example.com',
+    });
+    assert.equal(tailscale.status, 200);
+    assert.ok(JSON.parse(tailscale.body).gateway);
     const local = await get(gw.port, '/status');
     assert.equal(local.status, 200);
     assert.ok(JSON.parse(local.body).gateway);

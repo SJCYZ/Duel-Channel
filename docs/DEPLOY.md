@@ -78,7 +78,7 @@ sudo systemctl enable --now duel-channel
 journalctl -u duel-channel -f        # 查看日志
 ```
 
-服务器自身不提供 HTTPS。公开架设时必须放在 HTTPS 反向代理之后，并将网关端口限制为本机或私网可达；不要让网关端口直接接受公网连接。只有当网关看到的 TCP 对端是 loopback 或私网地址时，`TRUST_PROXY=1` 才会采用经过 IP 校验的 `X-Forwarded-For` 最右侧地址。反向代理必须覆盖入站的 `X-Forwarded-For`，写入它实际观察到的客户端地址，并屏蔽公网对 `/status` 的访问。公网监控应转发 `/healthz`；详细状态仅从服务器本机查询。配置示例见「状态与健康检查」。另请遵守非商业的使用限制（[NOTICE.md](../NOTICE.md)）。
+服务器自身不提供 HTTPS。公开架设时必须放在 HTTPS 反向代理之后，并将网关端口限制为本机或私网可达；不要让网关端口直接接受公网连接。只有当网关看到的 TCP 对端是 loopback 或私网地址时，`TRUST_PROXY=1` 才会采用经过 IP 校验的 `X-Forwarded-For` 最右侧地址。反向代理必须覆盖入站的 `X-Forwarded-For`，写入它实际观察到的客户端地址，并屏蔽公网对 `/status` 的访问。公网监控应转发 `/healthz`；详细状态仅通过本机或 Tailnet 专用的 Tailscale Serve 查询。配置示例见「状态与健康检查」。另请遵守非商业的使用限制（[NOTICE.md](../NOTICE.md)）。
 
 ### 页面怎样加载
 
@@ -129,8 +129,8 @@ node server/launch.mjs --host 0.0.0.0       # 网关监听所有网卡（局域�
 
 - 每轮的战斗种子在押注结束后才发给页面，开局时只给出它的承诺（`sha256(种子:盐)`），页面会核对；押注的最后 7 秒是暗选，这时的选择不公开；知道结果的 NPC 只在暗选时段选择。规则见 [MECHANICS.md](MECHANICS.md)「押注与结算」。
 - 公开匹配（礼物对决、竞猜对决的匹配队列）：同一个浏览器同时只能占一个座位（排队中或比赛还在进行时不能再排队）；同一地址的玩家会被分到不同的桌（`QUEUE_SAME_IP=1` 可以关掉）。群组房间由房主邀请，不受这两条限制。
-- 限流：大厅和对局连接的消息都有速率上限，持续刷消息的连接会被断开；同一地址每分钟最多输错 10 次房间邀请码。`/status` 仅允许 loopback 客户端读取，且只对本机请求显示房间邀请码。公网反向代理必须屏蔽 `/status`；代理对外提供 `/healthz` 作为精简健康检查，详细状态只能从服务器本机直接查询。
-- 防滥用（防止有人开一堆房间或比赛占满服务器）：按网络计数——IPv4 按地址、IPv6 按 /64 前缀（一个家庭或用户通常拥有整个 /64）——限制大厅连接数、同时存在的房间数、每分钟建房次数和进行中的比赛数，全服也有房间和比赛的总数上限，数值见上面的参数表（设为 `0` 表示不限）。勾选 NPC 补位的房间一个人就能开局，每场比赛都要在对战实例上模拟十轮，所以比赛数是最要紧的一条；1 核的小服务器建议把 `MAX_MATCHES` 调到 20～30。未启用可信代理或代理地址不受信时，连接按 TCP 对端地址计数；公开架设须启用 `TRUST_PROXY=1`，并确保网关前的代理从本机或私网连接且覆盖传入 XFF，否则所有玩家可能按代理地址计数，限流无法按玩家地址区分。被拒绝的情况每个网络每分钟记一行日志（`limit: …`），`/status` 的 `gateway.limits` 显示当前上限，`gateway.playing` 是正在进行的比赛数；该详细页面仅从服务器本机直接查询。
+- 限流：大厅和对局连接的消息都有速率上限，持续刷消息的连接会被断开；同一地址每分钟最多输错 10 次房间邀请码。`/status` 仅允许 loopback 客户端或来自可信本机/私网代理、带有 Tailscale Serve 身份头的请求读取。公网反向代理必须屏蔽 `/status` 并清除客户端传入的 `Tailscale-User-Login`；代理对外提供 `/healthz` 作为精简健康检查。
+- 防滥用（防止有人开一堆房间或比赛占满服务器）：按网络计数——IPv4 按地址、IPv6 按 /64 前缀（一个家庭或用户通常拥有整个 /64）——限制大厅连接数、同时存在的房间数、每分钟建房次数和进行中的比赛数，全服也有房间和比赛的总数上限，数值见上面的参数表（设为 `0` 表示不限）。勾选 NPC 补位的房间一个人就能开局，每场比赛都要在对战实例上模拟十轮，所以比赛数是最要紧的一条；1 核的小服务器建议把 `MAX_MATCHES` 调到 20～30。未启用可信代理或代理地址不受信时，连接按 TCP 对端地址计数；公开架设须启用 `TRUST_PROXY=1`，并确保网关前的代理从本机或私网连接且覆盖传入 XFF，否则所有玩家可能按代理地址计数，限流无法按玩家地址区分。被拒绝的情况每个网络每分钟记一行日志（`limit: …`），`/status` 的 `gateway.limits` 显示当前上限，`gateway.playing` 是正在进行的比赛数；该详细页面仅通过本机或 Tailnet 专用的 Tailscale Serve 查询。
 - 机器人（`bots.mjs`）和 NPC 补位不受这些限制影响。
 
 ### 录制用的调试模式
@@ -147,8 +147,17 @@ npm start -- --debug            # 或 DUEL_DEBUG=1 npm start
 
 ### 状态与健康检查
 
-- <http://127.0.0.1:8600/status>：实例负载、进行中的比赛、匹配队列、房间、最近的服务端错误（`errors`）和收到的错误报告数（`reports`）。仅 loopback 客户端可读取；其他客户端收到空 `404`。公网反向代理必须屏蔽此路径，详细状态仅从服务器本机直接查询。
+- <http://127.0.0.1:8600/status>：实例负载、进行中的比赛、匹配队列、房间、最近的服务端错误（`errors`）和收到的错误报告数（`reports`）。仅 loopback 客户端或来自可信本机/私网代理、带有 Tailscale Serve 身份头的请求可读取；其他客户端收到空 `404`。公网反向代理必须继续屏蔽此路径并清除客户端传入的 `Tailscale-User-Login`。
 - <http://127.0.0.1:8600/healthz>：`{"ok":true,"instances":N,"page":true}`，供容器与监控使用，反向代理应转发此路径。页面尚未构建时首页返回 503 并给出提示。
+
+ECS 可通过 Tailscale Serve 提供 Tailnet 专用的完整网页入口（页面、资源、WebSocket 和 `/status`）：
+
+```bash
+tailscale serve --https=8443 --bg http://127.0.0.1:8600
+tailscale serve status
+```
+
+访问 `https://<ECS 的 MagicDNS 名称>:8443/`。本机已有的 HTTPS Serve 端口可以继续服务其他项目；不要启用 Funnel。公网域名仍由反向代理提供，且 `/status` 必须继续返回 `404`。
 
 同机 Nginx 示例（替换域名和证书路径）。`/status` 在代理处拒绝，其他请求（包括 `/healthz`）转发到仅本机监听的网关；设置头会覆盖客户端传入的同名 XFF：
 
@@ -172,6 +181,7 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header Tailscale-User-Login "";
     }
 }
 ```

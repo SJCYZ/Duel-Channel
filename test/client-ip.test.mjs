@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveClientIp, isLoopbackIp } from '../server/client-ip.mjs';
+import * as clientIp from '../server/client-ip.mjs';
 
 const request = (remoteAddress, forwardedFor) => ({
   socket: { remoteAddress },
@@ -17,6 +18,14 @@ test('ignores XFF from a public TCP peer', () => {
 
 test('uses the rightmost valid XFF address from a trusted private proxy', () => {
   assert.equal(resolveClientIp(request('10.2.3.4', '198.51.100.4, 192.0.2.9'), true), '192.0.2.9');
+});
+
+test('recognizes trusted Docker and Tailscale proxy peers but rejects public peers', () => {
+  assert.equal(typeof clientIp.isTrustedProxyIp, 'function');
+  assert.equal(clientIp.isTrustedProxyIp('172.17.0.1'), true);
+  assert.equal(clientIp.isTrustedProxyIp('100.116.186.119'), true);
+  assert.equal(clientIp.isTrustedProxyIp('::ffff:172.17.0.1'), true);
+  assert.equal(clientIp.isTrustedProxyIp('203.0.113.8'), false);
 });
 
 test('falls back to the TCP peer for missing or invalid XFF', () => {

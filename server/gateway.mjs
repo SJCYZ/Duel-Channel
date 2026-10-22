@@ -26,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { SIM } from './game.mjs';
 import { installCrashLog, recordError, recentErrors, saveReport, reportCount } from './errors.mjs';
-import { resolveClientIp, isLoopbackIp } from './client-ip.mjs';
+import { resolveClientIp, isLoopbackIp, isTrustedProxyIp } from './client-ip.mjs';
 
 const PORT = Number(process.env.PORT || 8600), HOST = process.env.HOST || '127.0.0.1';
 const INSTANCES = (process.env.INSTANCES || '8611,8612,8613').split(',').map(Number);
@@ -396,11 +396,14 @@ const server = http.createServer((req, res) => {
   // a liveness probe for containers and CI: the gateway answers, and how many instances it can reach
   if (u.pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, instances: [...inst.values()].filter((i) => i.up).length, page: hasPage() })); return; }
   if (u.pathname === '/status') {
-    if (!isLoopbackIp(resolveClientIp(req, TRUST_PROXY))) { res.writeHead(404); res.end(); return; }
+    const local = isLoopbackIp(resolveClientIp(req, TRUST_PROXY));
+    const login = req.headers['tailscale-user-login'];
+    const tailscale = TRUST_PROXY && isTrustedProxyIp(req.socket.remoteAddress) && typeof login === 'string' && login.trim().length > 0;
+    if (!local && !tailscale) { res.writeHead(404); res.end(); return; }
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ gateway: { port: PORT, pid: process.pid, sessions: sessions.size, relays, limits: LIMIT, playing: playing.size, queues: Object.fromEntries(QUEUE_MODES.map((m) => [m, queues[m].map((s) => s.name)])), errors: recentErrors(), reports: reportCount() },
-      // a room's code only for this machine: anyone else could walk into a private room with it
-      rooms: [...rooms.values()].map((r) => ({ ...(isLoopbackIp(req.socket.remoteAddress) ? { code: r.code } : {}), mode: r.mode, host: r.host.name, members: r.members.map((m) => m.name), npc: r.npc })),
+      // room codes are available only to local or Tailscale Serve clients: anyone else could walk into a private room
+      rooms: [...rooms.values()].map((r) => ({ ...(local || tailscale ? { code: r.code } : {}), mode: r.mode, host: r.host.name, members: r.members.map((m) => m.name), npc: r.npc })),
       instances: [...inst.values()].map((i) => ({ port: i.port, up: i.up, matches: i.matches, players: i.players, list: i.list })) }, null, 1));
     return;
   }
