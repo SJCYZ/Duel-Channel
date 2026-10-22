@@ -417,7 +417,7 @@ function takeReport(req, res) {
 }
 
 // ---- HTTP + WebSocket ---------------------------------------------------------------------------------------------------
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   if (u.pathname === '/' || u.pathname === '/index.html') {
     if (existsSync(SHELL)) { sendFile(req, res, SHELL, 'text/html; charset=utf-8', 'no-cache'); return; }
