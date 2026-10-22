@@ -526,15 +526,17 @@ async function stRoom(ctx) {
 
 // ---- 4 STARTING SOON -----------------------------------------------------------------------------------------------
 const currentElapsedMs = (current) => Math.max(0, (current?.elapsedMs || 0) + (G.currentAt ? performance.now() - G.currentAt : 0));
-const matchState = (current) => ({ wait: 'wait', show: 'show', loading: 'loading', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[current?.phase] || 'show');
-function takeMatchSync(scr, ctx) {
-  const sync = NET.match?.take('sync');
-  if (!sync) return null;
-  applyMatchSnapshot(sync);
+const matchStateForSnapshot = (current) => ({ wait: 'wait', show: 'show', loading: 'loading', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[current?.phase] || 'show');
+function applyMatchSync(sync, scr, ctx) {
+  const queued = NET.match?.drain('sync') || [];
+  if (!sync && !queued.length) return null;
+  const latest = queued.length ? queued[queued.length - 1] : sync;
+  applyMatchSnapshot(latest);
   if (ctx?.pending) { ctx.pending(); ctx.pending = null; }
   if (scr) scr.close();
-  return matchState(G.current);
+  return matchStateForSnapshot(G.current);
 }
+const takeMatchSync = (scr, ctx) => applyMatchSync(null, scr, ctx);
 async function waitWithMatchSync(promise, scr) {
   for (;;) {
     const state = takeMatchSync(scr);
@@ -547,8 +549,7 @@ async function stWait() {
   for (;;) {
     const m = await NET.match.next(['phase', 'sync', 'finish']);
     if (m.t === 'sync') {
-      applyMatchSnapshot(m);
-      return matchState(m.current);
+      return applyMatchSync(m);
     }
     if (m.t === 'finish') { G.matchOver = true; return 'finish'; }
     if (m.name === 'show') return 'show';
@@ -612,7 +613,7 @@ async function stLoading(ctx) {
   if (G.online) {
     if (G.role !== 'spectator') NET.match.send({ t: 'ready' });
     const m = await NET.match.next(['round', 'finish', 'sync']);
-    if (m.t === 'sync') { applyMatchSnapshot(m); scr.close(); return matchState(m.current); }
+    if (m.t === 'sync') return applyMatchSync(m, scr);
     const queuedSyncState = takeMatchSync(scr);
     if (queuedSyncState) return queuedSyncState;
     NET.match.q.unshift(m);
