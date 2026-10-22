@@ -34,6 +34,7 @@ const QUEUE_FILL_MS = Number(process.env.QUEUE_FILL_MS || 10000);
 const MIN_ROOM = SIM.DCFG.consts.minRoomNum || 2;
 // the modes a queue or a room can be for, and their table sizes (modes.*.maxPlayer: 8 and 30)
 const QUEUE_MODES = ['multiOperationMatch', 'multiStandMatch'], ROOM_MODES = ['multiOperationRoom', 'multiStandRoom'];
+const ROOM_CAPACITIES = { multiOperationRoom: [8, 16, 24], multiStandRoom: [30, 60, 90] };
 const seatsOf = (mode) => (SIM.DCFG.modes[mode] || {}).maxPlayer || 8;
 const PUBLIC = process.env.DUEL_PUBLIC || fileURLToPath(new URL('../public', import.meta.url));
 const SHELL = join(PUBLIC, 'index.html'), SINGLE = join(PUBLIC, 'duel-flow.html'), CHECK = join(PUBLIC, 'sim-check.html');
@@ -114,6 +115,7 @@ const inst = new Map(INSTANCES.map((p) => [p, { port: p, up: false, matches: 0, 
 // the browsers whose seat in a running match is still in play (the instances' lists), and those just seated (until the
 // next poll has them)
 const justSeated = new Map();
+const activeRoomMatches = new Map();
 function seatedCids() {
   const out = new Set();
   for (const i of inst.values()) for (const m of i.list || []) for (const c of m.cids || []) out.add(c);
@@ -129,6 +131,7 @@ async function poll() {
   const live = new Set();
   for (const i of inst.values()) for (const m of i.list || []) live.add(m.id);
   for (const [id, x] of playing) if (!live.has(id) && Date.now() - x.at > 6000) playing.delete(id);
+  for (const [code, x] of activeRoomMatches) if (!playing.has(x.matchId)) activeRoomMatches.delete(code);
 }
 // the matches this gateway started that are still in play, and the networks seated in each (the abuse limits)
 const playing = new Map();
@@ -140,18 +143,26 @@ function matchRefused(members) {
   return null;
 }
 setInterval(poll, 2000); poll();
-async function createMatch(mode, members, npcFill) {
+async function createMatch(mode, members, npcFill, room = null) {
   await poll();
   const live = [...inst.values()].filter((i) => i.up).sort((a, b) => a.matches - b.matches);
   if (!live.length) throw new Error('没有可用的对战实例');
   const r = await fetch(`http://127.0.0.1:${live[0].port}/create`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode, npcFill, humans: members.map((s) => ({ name: s.name, tag: s.tag, avatar: s.avatar, cid: s.cid })) }) });
+    body: JSON.stringify({ mode, npcFill, ...(room ? { capacity: room.capacity } : {}), humans: members.map((s) => ({ name: s.name, tag: s.tag, avatar: s.avatar, cid: s.cid })) }) });
   const o = await r.json();
   if (!r.ok) throw new Error(o.error || 'create failed');
   live[0].matches++;
   playing.set(o.matchId, { nets: new Set(members.map((s) => s.net).filter(Boolean)), at: Date.now() });
   for (const s of members) if (s.cid) justSeated.set(s.cid, Date.now());
-  members.forEach((s, i) => { s.state = 'idle'; s.room = null; send(s, { t: 'matched', port: o.port, matchId: o.matchId, token: o.seats[i].token, mode }); });
+  if (room) {
+    activeRoomMatches.set(room.code, { port: o.port, matchId: o.matchId, mode, capacity: room.capacity, full: members.length >= room.capacity });
+    members.forEach((s, i) => { s.state = 'idle'; s.room = null; s.role = null; send(s, { t: 'matched', role: 'player', port: o.port, matchId: o.matchId, token: o.seats[i].token, mode }); });
+    for (const s of room.spectators) {
+      s.state = 'idle'; s.room = null; s.role = null;
+      send(s, { t: 'matched', role: 'spectator', port: o.port, matchId: o.matchId, code: room.code, mode });
+    }
+    rooms.delete(room.code);
+  } else members.forEach((s, i) => { s.state = 'idle'; s.room = null; send(s, { t: 'matched', port: o.port, matchId: o.matchId, token: o.seats[i].token, mode }); });
   log(`match ${o.matchId} → instance ${o.port}: ${members.map((s) => s.name).join(', ')}${npcFill ? ' + NPC' : ''}`);
 }
 
@@ -235,16 +246,20 @@ setInterval(() => { for (const m of QUEUE_MODES) matchQueue(m); }, 500);
 // ---- rooms -----------------------------------------------------------------------------------------------------------
 const rooms = new Map();
 function roomState(r) {
-  return { t: 'room', code: r.code, mode: r.mode, npc: r.npc, max: seatsOf(r.mode), host: r.host.id, members: r.members.map((m) => ({ id: m.id, name: m.name, tag: m.tag, avatar: m.avatar, away: !m.ws })) };
+  const viewer = (m) => ({ id: m.id, name: m.name, tag: m.tag, avatar: m.avatar, away: !m.ws });
+  return { t: 'room', code: r.code, mode: r.mode, npc: r.npc, max: r.capacity, host: r.host?.id || null, members: r.members.map(viewer), spectators: r.spectators.map(viewer) };
 }
-function pushRoom(r) { const st = roomState(r); for (const m of r.members) send(m, st); }
+function pushRoom(r) { const st = roomState(r); for (const m of [...r.members, ...r.spectators]) send(m, st); }
 function leaveRoom(s) {
   const r = s.room && rooms.get(s.room);
   s.room = null; if (s.state === 'room') s.state = 'idle';
   if (!r) return;
+  const wasMember = r.members.includes(s);
   r.members = r.members.filter((m) => m !== s);
-  if (!r.members.length) { rooms.delete(r.code); return; }
-  if (r.host === s) r.host = r.members[0];
+  r.spectators = r.spectators.filter((m) => m !== s);
+  s.role = null;
+  if (!r.members.length && !r.started) { rooms.delete(r.code); for (const watcher of r.spectators) { watcher.room = null; watcher.state = 'idle'; watcher.role = null; } r.spectators = []; return; }
+  if (wasMember && r.host === s) r.host = r.members[0] || null;
   pushRoom(r);
 }
 
@@ -277,36 +292,65 @@ function onMessage(s, m) {
         logRefused(s.net, 'rooms per network'); send(s, { t: 'error', msg: '同一网络创建的房间已达上限，请先关闭其他房间' }); break;
       }
       if (LIMIT.rooms && rooms.size >= LIMIT.rooms && !(s.room && rooms.get(s.room) && rooms.get(s.room).host === s)) { logRefused('*', 'rooms in all'); send(s, { t: 'error', msg: '服务器房间已满，请稍后再试' }); break; }
+      let code; do code = newCode(); while (rooms.has(code) || activeRoomMatches.has(code));
+      const mode = ROOM_MODES.includes(m.mode) ? m.mode : 'multiOperationRoom';
+      const capacity = m.capacity == null ? seatsOf(mode) : Number(m.capacity);
+      if (!ROOM_CAPACITIES[mode].includes(capacity)) { send(s, { t: 'error', msg: '房间容量无效' }); break; }
       leaveQueue(s); leaveRoom(s);
-      let code; do code = newCode(); while (rooms.has(code));
-      const r = { code, mode: ROOM_MODES.includes(m.mode) ? m.mode : 'multiOperationRoom', host: s, members: [s], npc: false };
+      const r = { code, mode, capacity, host: s, members: [s], spectators: [], npc: false, started: false };
       rooms.set(code, r); s.room = code; s.state = 'room';
       if (s.net) lastMinute(roomCreates, s.net).push(Date.now());
       pushRoom(r);
       break;
     }
+    case 'room.lookup': {
+      const who = s.ip || s.id, code = String(m.code || '').trim(), r = rooms.get(code), active = activeRoomMatches.get(code);
+      if (joinBlocked(who)) { send(s, { t: 'error', msg: '尝试过于频繁，请稍后再试' }); break; }
+      const host = r || active ? null : elsewhere(code);
+      if (host) { send(s, { t: 'elsewhere', code, host }); break; }
+      if (!r && !active) { joinFailed(who); send(s, { t: 'error', msg: '房间不存在或已无法加入' }); break; }
+      if (r) send(s, { t: 'room.info', code, mode: r.mode, max: r.capacity, started: r.started, full: r.members.length >= r.capacity });
+      else send(s, { t: 'room.info', code, mode: active.mode, max: active.capacity, started: true, full: active.full });
+      break;
+    }
     case 'room.join': {
       const who = s.ip || s.id;
       if (joinBlocked(who)) { send(s, { t: 'error', msg: '尝试过于频繁，请稍后再试' }); break; }
-      const code = String(m.code || '').trim(), r = rooms.get(code), host = r ? null : elsewhere(code);
+      const code = String(m.code || '').trim(), role = m.role === 'spectator' ? 'spectator' : 'player';
+      const r = rooms.get(code), active = activeRoomMatches.get(code), host = r || active ? null : elsewhere(code);
       if (host) { send(s, { t: 'elsewhere', code, host }); break; }
-      if (!r) { joinFailed(who); send(s, { t: 'error', msg: '房间不存在或已无法加入' }); break; }
-      if (r.members.length >= seatsOf(r.mode)) { send(s, { t: 'error', msg: '房间已满' }); break; }
+      if (!r && !active) { joinFailed(who); send(s, { t: 'error', msg: '房间不存在或已无法加入' }); break; }
+      if (active) {
+        if (role !== 'spectator') { send(s, { t: 'error', msg: '比赛已开始，只能观战' }); break; }
+        send(s, { t: 'matched', role: 'spectator', port: active.port, matchId: active.matchId, code, mode: active.mode });
+        break;
+      }
+      if (role === 'player' && r.started) { send(s, { t: 'error', msg: '比赛已开始，只能观战' }); break; }
+      if (role === 'player' && r.members.length >= r.capacity) { send(s, { t: 'error', msg: '房间已满' }); break; }
       leaveQueue(s); leaveRoom(s);
-      r.members.push(s); s.room = r.code; s.state = 'room';
+      if (role === 'player') r.members.push(s); else r.spectators.push(s);
+      s.room = r.code; s.state = 'room'; s.role = role;
       pushRoom(r);
       break;
     }
-    case 'room.npc': { const r = rooms.get(s.room); if (r && r.host === s) { r.npc = !!m.on; pushRoom(r); } break; }
+    case 'room.npc': { const r = rooms.get(s.room); if (r && !r.started && r.host === s) { r.npc = !!m.on; pushRoom(r); } break; }
     case 'room.leave': leaveRoom(s); break;
     case 'room.start': {
       const r = rooms.get(s.room);
-      if (!r || r.host !== s) break;
+      if (!r || r.host !== s || r.started) break;
       if (r.members.length < MIN_ROOM && !r.npc) { send(s, { t: 'error', msg: `至少需要 ${MIN_ROOM} 名玩家，或勾选“开局时添加NPC进行补位”` }); break; }
       const refused = matchRefused(r.members);
       if (refused) { logRefused(s.net || '*', 'room start: ' + refused); send(s, { t: 'error', msg: refused }); break; }
-      rooms.delete(r.code);
-      createMatch(r.mode, r.members, r.npc).catch((e) => { recordError('gateway', 'create match (room)', e); for (const x of r.members) send(x, { t: 'error', msg: '开局失败：' + e.message }); });
+      r.started = true; pushRoom(r);
+      createMatch(r.mode, r.members, r.npc, r).catch((e) => {
+        recordError('gateway', 'create match (room)', e); r.started = false;
+        for (const x of [...r.members, ...r.spectators]) send(x, { t: 'error', msg: '开局失败：' + e.message });
+        if (!r.members.length) {
+          rooms.delete(r.code);
+          for (const watcher of r.spectators) { watcher.room = null; watcher.state = 'idle'; watcher.role = null; }
+          r.spectators = [];
+        } else pushRoom(r);
+      });
       break;
     }
     default:
@@ -403,27 +447,28 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ gateway: { port: PORT, pid: process.pid, sessions: sessions.size, relays, limits: LIMIT, playing: playing.size, queues: Object.fromEntries(QUEUE_MODES.map((m) => [m, queues[m].map((s) => s.name)])), errors: recentErrors(), reports: reportCount() },
       // room codes are available only to local or Tailscale Serve clients: anyone else could walk into a private room
-      rooms: [...rooms.values()].map((r) => ({ ...(local || tailscale ? { code: r.code } : {}), mode: r.mode, host: r.host.name, members: r.members.map((m) => m.name), npc: r.npc })),
+      rooms: [...rooms.values()].map((r) => ({ ...(local || tailscale ? { code: r.code } : {}), mode: r.mode, host: r.host?.name || null, members: r.members.map((m) => m.name), npc: r.npc })),
       instances: [...inst.values()].map((i) => ({ port: i.port, up: i.up, matches: i.matches, players: i.players, list: i.list })) }, null, 1));
     return;
   }
   res.writeHead(404); res.end('not found');
 });
 // ---- a match's connection, relayed --------------------------------------------------------------------------------------
-// The page reaches its match through the gateway: /match?port=<instance>&m=<match>&k=<seat token>[&since=<seq>] is
-// passed on, byte for byte, to that instance on this machine. Only the gateway's port has to be reachable (one port to
-// open or forward), and behind an HTTPS proxy or tunnel the page uses wss:// for both. The request line is rebuilt from
-// the four checked parameters, and only the instances' ports are dialled.
+// The page reaches its match through the gateway: players provide their seat token, observers provide an active room
+// code. Only the gateway's port has to be reachable (one port to open or forward), including behind an HTTPS proxy.
 let relays = 0;
 function relayMatch(req, socket, head, u) {
-  const q = u.searchParams, port = Number(q.get('port')), m = q.get('m') || '', k = q.get('k') || '', since = q.get('since');
-  if (!INSTANCES.includes(port) || !/^\d+-\d+$/.test(m) || !/^[0-9a-f]{24}$/.test(k) || (since !== null && !/^\d+$/.test(since))) { socket.destroy(); return; }
+  const q = u.searchParams, port = Number(q.get('port')), m = q.get('m') || '', k = q.get('k') || '', code = q.get('code') || '';
+  const player = /^[0-9a-f]{24}$/.test(k) && !code;
+  const active = /^\d{6}$/.test(code) ? activeRoomMatches.get(code) : null;
+  const spectator = !k && active && active.port === port && active.matchId === m;
+  if (!INSTANCES.includes(port) || !/^\d+-\d+$/.test(m) || (!player && !spectator)) { socket.destroy(); return; }
   const up = connect(port, '127.0.0.1');
   let open = true;
   const end = () => { if (!open) return; open = false; relays--; up.destroy(); socket.destroy(); };
   relays++;
   up.on('connect', () => {
-    const head1 = [`GET /match?m=${m}&k=${k}${since !== null ? `&since=${since}` : ''} HTTP/1.1`];
+    const head1 = [`GET /match?m=${m}${player ? `&k=${k}` : '&watch=1'} HTTP/1.1`];
     for (let i = 0; i < req.rawHeaders.length; i += 2) head1.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
     up.write(head1.join('\r\n') + '\r\n\r\n');
     if (head && head.length) up.write(head);
