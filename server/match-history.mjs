@@ -26,7 +26,7 @@ const historyFiles = async () => (await readdir(DIR)).filter((name) => /^\d{13}-
 const readEntry = async (name) => {
   try {
     const x = JSON.parse(await readFile(join(DIR, name), 'utf8'));
-    if (!x || !/^[0-9a-f-]{36}$/.test(x.id || '') || !['multiOperationMatch', 'multiStandMatch'].includes(x.mode) ||
+    if (!x || !/^[0-9a-f-]{36}$/.test(x.id || '') || !['multiOperationMatch', 'multiStandMatch', 'multiOperationRoom', 'multiStandRoom'].includes(x.mode) ||
         !Number.isFinite(Date.parse(x.startedAt)) || !Number.isFinite(Date.parse(x.endedAt)) || !Array.isArray(x.participants)) return null;
     return {
       id: x.id, mode: x.mode, startedAt: x.startedAt, endedAt: x.endedAt,
