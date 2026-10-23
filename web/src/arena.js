@@ -1861,10 +1861,10 @@ function unitHud(u, dt, k, s) {
   }
 }
 // Playback speeds up as a battle drags on (the event's behaviour as players describe it; no table or client constant
-// carries the curve): 1× for the first 15 s of battle time, rising linearly to 2× at 45 s and 3× at 90 s, 3× after
-// that. It changes how fast the fight is shown, never the fight: the sim steps are the same, so every client and the
-// server's prediction still agree.
-const PLAYBACK = [[0, 1], [15, 1], [45, 2], [90, 3]];
+// carries the curve): 2× for the first 45 s of battle time, rising linearly to 3× at 90 s, 3× after that. It changes
+// how fast the fight is shown, never the fight: the sim steps are the same, so every client and the server's
+// prediction still agree.
+const PLAYBACK = [[0, 2], [15, 2], [45, 2], [90, 3]];
 function playbackRate(t) {
   for (let i = 1; i < PLAYBACK.length; i++) {
     const [t1, r1] = PLAYBACK[i];
