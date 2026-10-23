@@ -76,20 +76,20 @@ test('the served page: encodings, validators, the immutable pack, only the build
   try { assert.equal((await get(gw3.port, '/')).status, 503); } finally { gw3.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('public edge: /status accepts local and Tailscale Serve requests while /healthz stays public', async () => {
+test('public edge: /status.json accepts local and Tailscale Serve requests while /healthz stays public', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'duel-pub-'));
   const gw = await gateway(dir, join(dir, 'logs'), { TRUST_PROXY: '1' });
   try {
-    const remote = await get(gw.port, '/status', { 'X-Forwarded-For': '203.0.113.8' });
+    const remote = await get(gw.port, '/status.json', { 'X-Forwarded-For': '203.0.113.8' });
     assert.equal(remote.status, 404);
     assert.equal(remote.body.length, 0);
-    const tailscale = await get(gw.port, '/status', {
+    const tailscale = await get(gw.port, '/status.json', {
       'X-Forwarded-For': '100.101.102.103',
       'Tailscale-User-Login': 'alice@example.com',
     });
     assert.equal(tailscale.status, 200);
     assert.ok(JSON.parse(tailscale.body).gateway);
-    const local = await get(gw.port, '/status');
+    const local = await get(gw.port, '/status.json');
     assert.equal(local.status, 200);
     assert.ok(JSON.parse(local.body).gateway);
     const health = await get(gw.port, '/healthz', { 'X-Forwarded-For': '203.0.113.8' });
@@ -166,15 +166,15 @@ test('a match connection through the gateway: relayed to its instance, close cod
     const base = `ws://127.0.0.1:${port}/match?port=${ip}&m=${o.matchId}`;
     const ok = await first(`${base}&k=${o.seats[0].token}`);
     assert.equal(ok.msg.t, 'hello'); assert.equal(ok.msg.you, 'p1'); assert.equal(ok.msg.players.length, 8);
-    assert.equal(JSON.parse((await get(port, '/status')).body).gateway.relays, 1);
+    assert.equal(JSON.parse((await get(port, '/status.json')).body).gateway.relays, 1);
     ok.ws.close();
     // the instance's own close code comes through: a token it does not know is final (4001)
     assert.equal((await first(`${base}&k=${'0'.repeat(24)}`)).code, 4001);
     // malformed, or a port that is not one of the instances: refused before anything is dialled
-    for (const q of [`port=${port}&m=${o.matchId}&k=${o.seats[0].token}`, `port=${ip}&m=x&k=${o.seats[0].token}`, `port=${ip}&m=${o.matchId}&k=${o.seats[0].token}&since=-1`])
+    for (const q of [`port=${port}&m=${o.matchId}&k=${o.seats[0].token}`, `port=${ip}&m=x&k=${o.seats[0].token}`, `port=${ip}&m=${o.matchId}&k=invalid`])
       assert.ok((await first(`ws://127.0.0.1:${port}/match?${q}`)).error, q);
     await new Promise((r) => setTimeout(r, 200));
-    assert.equal(JSON.parse((await get(port, '/status')).body).gateway.relays, 0);
+    assert.equal(JSON.parse((await get(port, '/status.json')).body).gateway.relays, 0);
   } finally { gw.kill(); inst.kill(); rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -202,7 +202,7 @@ test('error reports: saved one file each under logs/reports, refused when empty,
     // five a minute from one address: four more pass (five saved), the sixth is refused
     for (let i = 0; i < 4; i++) assert.equal((await post({ text: 'again ' + i })).status, 200);
     assert.equal((await post({ text: 'one too many' })).status, 429);
-    const st = JSON.parse((await get(gw.port, '/status')).body);
+    const st = JSON.parse((await get(gw.port, '/status.json')).body);
     assert.equal(st.gateway.reports, 5);
     assert.ok(Array.isArray(st.gateway.errors));
   } finally { gw.stop(); rmSync(dir, { recursive: true, force: true }); }
@@ -226,9 +226,18 @@ test('error report limits use the parsed client address and rightmost forwarded 
 });
 
 test('the launcher starts a battle instance again after it dies', { timeout: 60000 }, async () => {
-  // a base port whose instance port (+11) is free too
+  // a base port whose instance port (+11) is available too
   let base;
-  for (;;) { base = await free(); if (base + 11 < 65535) break; }
+  for (;;) {
+    base = await free();
+    if (base + 11 >= 65535) continue;
+    const probe = createServer();
+    const available = await new Promise((resolve) => {
+      probe.once('error', () => resolve(false));
+      probe.listen(base + 11, '127.0.0.1', () => probe.close(() => resolve(true)));
+    });
+    if (available) break;
+  }
   const dir = mkdtempSync(join(tmpdir(), 'duel-pub-'));
   const p = spawn(process.execPath, [fileURLToPath(new URL('../server/launch.mjs', import.meta.url)), '--instances', '1', '--port', String(base)],
     { env: { ...process.env, DUEL_PUBLIC: dir, DUEL_LOGS: join(dir, 'logs') }, stdio: ['ignore', 'pipe', 'pipe'] });

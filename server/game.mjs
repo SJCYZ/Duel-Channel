@@ -36,6 +36,7 @@ const C = SIM.DCFG.consts;
 const env = (k, d) => (process.env[k] ? Number(process.env[k]) : d);
 const timings = (stand) => ({
   show: env('DUEL_SHOW_MS', 4500), loadMax: (C.maxLoadingTime || 15) * 1000, connectMax: 12000,
+  heartbeat: env('DUEL_HEARTBEAT_MS', 20000),
   bet: env('DUEL_BET_MS', ((stand ? C.modeStandSelectTime : C.modeOperationSelectTime) || 20) * 1000), result: env('DUEL_RESULT_MS', 3200),
   rank: env('DUEL_RANK_MS', ((stand ? C.modeStandRankTime : C.modeOperationRankTime) || 8) * 1000), battleExtra: 14000,
   rejoin: env('DUEL_REJOIN_MS', (C.maxRetryTimeInBattle || 30) * 1000),
@@ -51,7 +52,7 @@ const avatarKeys = () => SIM.POOL.map((f) => f.key);
 
 export class Match {
   constructor({ id, mode, humans, npcFill, capacity, log = () => {}, onError = null }) {
-    this.id = id; this.mode = mode; this.log = log; this.onError = onError; this.done = false; this.startedAt = new Date().toISOString(); this.round = null; this.r = 0; this.phase = 'wait'; this.phaseStartedAt = Date.now(); this.later = new Set();
+    this.id = id; this.mode = mode; this.log = log; this.onError = onError; this.done = false; this.ending = false; this.startedAt = new Date().toISOString(); this.round = null; this.r = 0; this.phase = 'wait'; this.phaseStartedAt = Date.now(); this.later = new Set();
     this.seq = 0; this.observers = new Set(); this.currentRound = null; this.publicChoices = {}; this.secret = false; this.battleStartAt = null; this.battleResult = null;
     this.stand = SIM.isStand(mode); this.T = timings(this.stand);
     // the rounds in turn, each the three events' versions of it (one drawn when it comes)
@@ -127,16 +128,43 @@ export class Match {
   attach(ws, tok) {
     const p = this.players.find((x) => x.human && x.token === tok);
     if (!p || p.left) { ws.close(4001, 'bad token'); return; }
+    if (p.out) { this.attachObserver(ws); return; }
     if (p.ws && p.ws !== ws) try { p.ws.close(4002, 'replaced'); } catch (e) { /* gone */ }
     p.ws = ws; p.connected = true;
+    let awaitingPong = false, interrupted = false;
+    const heartbeat = setInterval(() => {
+      if (p.ws !== ws || interrupted || this.ending) return;
+      if (awaitingPong) {
+        interrupted = true;
+        clearInterval(heartbeat);
+        p.connected = false; p.ws = null;
+        this.recordInterruption(p, 'heartbeat interrupted');
+        this.bcast({ t: 'player.status', id: p.id, connected: false, out: p.out, outRound: p.outRound });
+        try { ws.terminate?.(); } catch (e) { /* gone */ }
+        return;
+      }
+      try { ws.ping?.(); awaitingPong = true; } catch (e) { /* close handler records the interruption */ }
+    }, this.T.heartbeat);
+    heartbeat.unref?.();
+    ws.on('pong', () => { if (p.ws === ws && !interrupted) awaitingPong = false; });
     this.log(`${p.name} connected`);
     this.hello(ws, 'player', p);
+    this.bcast({ t: 'player.status', id: p.id, connected: true, out: false, outRound: p.outRound });
     ws.on('message', (data) => {
       if (!this.allow(p)) { if (p.dropped > RATE_KICK) try { ws.close(4008, 'too many messages'); } catch (e) { /* gone */ } return; }
       let m; try { m = JSON.parse(data); } catch (e) { return; }
       if (m && typeof m === 'object') this.onMessage(p, m);
     });
-    ws.on('close', () => { if (p.ws === ws) { p.ws = null; p.connected = false; this.log(`${p.name} disconnected`); } });
+    ws.on('close', () => {
+      clearInterval(heartbeat);
+      if (p.ws === ws) {
+        p.ws = null; p.connected = false;
+        if (!interrupted && !p.left && !this.ending) {
+          this.recordInterruption(p);
+        } else this.log(`${p.name} disconnected`);
+        if (!this.ending) this.bcast({ t: 'player.status', id: p.id, connected: false, out: p.out, outRound: p.outRound });
+      }
+    });
     if (this.done) setTimeout(() => { try { ws.close(1000, 'match over'); } catch (e) { /* gone */ } }, 3000);
   }
   // the seat's message bucket (RATE_*)
@@ -160,6 +188,15 @@ export class Match {
     else if (m.t === 'emoji') this.emoji(p, m.pic);
     // the page's latency probe: echo its clock back
     else if (m.t === 'ping' && Number.isFinite(m.c)) this.send(p, { t: 'pong', c: m.c });
+  }
+  recordInterruption(p, reason = 'disconnected') {
+    p.interruptions = (p.interruptions || 0) + 1;
+    this.log(`${p.name} ${reason} (${p.interruptions})`);
+    if (p.interruptions >= 2 && !p.out) {
+      p.out = true;
+      p.outRound = this.stand ? (['prepare', 'bet', 'battle'].includes(this.phase) ? this.r : this.r + 1) : this.r;
+      if (this.stand) SIM.standLeave(p, p.outRound);
+    }
   }
   // an emoji for the barrage: one of the theme's pictures, while the top bar is up (bets, battle, the round's end), at most
   // one per consts.chatCd seconds per seat; everyone (the sender too) gets it
@@ -209,19 +246,19 @@ export class Match {
   // until every human still in the match satisfies pred, at most ms: one whose connection is down is not waited for —
   // with unseated, neither is one that has not connected yet (the first connection is waited for: it may come late)
   async waitHumans(pred, ms, unseated = true) {
-    const until = Date.now() + ms;
+    const until = Number.isFinite(ms) ? Date.now() + ms : Infinity;
     while (Date.now() < until) {
-      if (this.humans().every((p) => p.left || (unseated && !p.connected) || pred(p))) return true;
+      if (this.humans().every((p) => p.left || p.out || (unseated && !p.connected) || pred(p))) return true;
       await sleep(100);
     }
-    return false;
+    return this.humans().every((p) => p.left || p.out || (unseated && !p.connected) || pred(p));
   }
-  anyHumanHere() { return this.humans().some((p) => p.connected && !p.left); }
+  anyHumanHere() { return this.humans().some((p) => p.connected && !p.left && !p.out); }
   // Before a round: if every viewer has dropped but not left, wait (up to `ms`, the page's own retry window) for one to
   // come back. Without this a short outage of the only human at a round's end closed the match while the page was still
   // reconnecting. True when someone is here.
   async waitRejoin(ms) {
-    const dropped = () => !this.anyHumanHere() && this.humans().some((p) => !p.left);
+    const dropped = () => !this.anyHumanHere() && this.humans().some((p) => !p.left && !p.out);
     if (!dropped()) return this.anyHumanHere();
     this.log(`match ${this.id}: every viewer dropped, waiting up to ${Math.round(ms / 1000)} s for one to come back`);
     const until = Date.now() + ms;
@@ -238,7 +275,7 @@ export class Match {
       this.setPhase('show'); this.bcast({ t: 'phase', name: 'show' });
       await sleep(T.show);
       this.setPhase('loading'); this.bcast({ t: 'phase', name: 'loading', ms: T.loadMax });
-      await this.waitHumans((p) => p.ready, T.loadMax);
+      await this.waitHumans((p) => p.ready, Infinity);
       // 礼物对决: the table's rounds while two viewers have gifts; 竞猜对决: until one viewer (or no human) is left, the
       // rounds past the table repeating its last row, at most modeStandRoundNumber
       const total = this.stand ? SIM.STAND.cap : this.rounds.length;
@@ -257,6 +294,7 @@ export class Match {
         : this.players.slice().sort((a, b) => b.pts - a.pts).map((p) => `${p.name} ${p.pts}`).join(', ')}`);
     } catch (e) { if (this.onError) this.onError(e); else this.log(`match ${this.id} error: ${e.stack || e}`); }
     for (const h of this.later) clearTimeout(h);
+    this.ending = true;
     await sleep(3000);
     for (const p of this.players) if (p.ws) try { p.ws.close(1000, 'match over'); } catch (e) { /* gone */ }
     for (const ws of this.observers) try { ws.close(1000, 'match over'); } catch (e) { /* gone */ }
@@ -280,8 +318,8 @@ export class Match {
       ...(DEBUG ? { seed, salt } : {}) };
     this.bcast({ t: 'round', r, roundId: rd.roundId, lineups: lineups.map((s) => s.map((g) => [g.f.key, g.n])), traps, commit: commitOf(seed, salt), betMs: T.bet, secretMs,
       ...(DEBUG ? { seed, salt } : {}) });
-    while (this.humans().some((p) => p.connected && !p.left && p.roundReady !== r)) await sleep(100);
-    this.setPhase('bet'); this.bcast({ t: 'round.start', r, betMs: T.bet, secretMs });
+    while (this.humans().some((p) => p.connected && !p.left && !p.out && p.roundReady !== r)) await sleep(100);
+    this.setPhase('bet'); this.bcast({ t: 'round.start', r, roundId: rd.roundId, betMs: T.bet, secretMs });
     // the NPC viewers: the FOLLOW_* ones (priority > 0) see the supporters as everyone could when the window turned
     // secret; the informed ones (their pick uses the outcome) decide in the secret window, the rest while picks show
     const sup = () => this.seen || this.supporters();
@@ -314,14 +352,14 @@ export class Match {
     }
     this.publicChoices = Object.fromEntries(this.players.filter((p) => p.choice).map((p) => [p.id, p.choice]));
     this.setPhase('battle'); this.battleStartAt = Date.now(); this.battleSeed = seed; this.battleSalt = salt;
-    this.bcast({ t: 'battle', choices: Object.fromEntries(this.players.filter((p) => p.choice).map((p) => [p.id, p.choice])), seed, salt });
+    this.bcast({ t: 'battle', r, roundId: rd.roundId, choices: Object.fromEntries(this.players.filter((p) => p.choice).map((p) => [p.id, p.choice])), seed, salt });
     // reactions while the fight runs (after the clients' round-start banner, within the battle)
     this.npcEmotes('battle', () => 2500 + Math.random() * Math.max(1000, Math.min(8000, pred.time * 1000)));
     await this.waitHumans((p) => p.watched, pred.time * 1000 + T.battleExtra);
     for (const p of this.players) if (stand) SIM.settleStand(p, p.choice, r, pred.winner); else SIM.settleOne(p, p.choice, rd, pred.winner);
     this.setPhase('result');
-    this.battleResult = { r, w: pred.winner, players: this.snapshot() };
-    this.bcast({ t: 'result', ...this.battleResult });
+    this.battleResult = { r, roundId: rd.roundId, w: pred.winner, players: this.snapshot() };
+    this.bcast({ t: 'result', ...this.battleResult, roundId: rd.roundId });
     // the outcome: the clients show the arena a moment longer before the round's panel
     this.npcEmotes('result', () => 100 + Math.random() * 700, (p) => p.right);
     await sleep(T.result + T.rank);

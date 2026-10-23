@@ -51,7 +51,7 @@ function bot(i) {
     else if (m.t === 'error') console.log(`[${name}] lobby error: ${m.msg}`);
   });
   function play(mt) {
-    let me = null, pts = 10000, tried = [], burst = false, lastSeq = 0, cur = null, drops = 0, out = false, draws = 0, over = false;
+    let me = null, pts = 10000, tried = [], burst = false, lastSeq = 0, cur = null, drops = 0, out = false, spectator = false, draws = 0, over = false;
     const seen = { others: 0, burst: 0, bad: 0 }, rounds = new Set(), results = new Set();
     const base = `${GATE}/match?port=${mt.port}&m=${mt.matchId}&k=${mt.token}`;
     // a test bot may lose its connection once, on round 3's bet: 'resume' comes back with the last seq it got (as the
@@ -67,8 +67,11 @@ function bot(i) {
         if (m.seq) { if (m.seq <= lastSeq) return; lastSeq = m.seq; }
         if (m.t === 'hello') {
           me = m.you;
+          if (m.role === 'spectator') { spectator = true; return; }
+          if (m.current?.phase === 'loading') say(cur, { t: 'ready' });
           if (m.current?.phase === 'prepare') say(cur, { t: 'round.ready', r: m.current.round?.r });
         }
+        else if (spectator) return;
         else if (m.t === 'emoji') {
           if (!/^pic_[a-z]+$/.test(m.pic) || m.pic === 'pic_nonexistent') seen.bad++;
           else if (m.id !== me) seen.others++;

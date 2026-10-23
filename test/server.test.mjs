@@ -44,7 +44,7 @@ test('a full match: 8 bots through the queue on one instance', { timeout: 240000
       const [, others, burst, bad] = l.match(/emoji: others (\d+), burst (\d+), bad (\d+)/).map(Number);
       assert.ok(others > 0, l); assert.equal(burst, 1, l); assert.equal(bad, 0, l);
     }
-    const st = await (await fetch(`http://127.0.0.1:${gw}/status`)).json();
+    const st = await (await fetch(`http://127.0.0.1:${gw}/status.json`)).json();
     assert.equal(st.instances.length, 1);
   } finally { for (const p of procs) p.kill(); }
 });
@@ -89,7 +89,7 @@ test('a 竞猜对决 match: 12 bots in a room filled to 30 with NPCs, played to 
       assert.ok(a[0] > b[0] || (a[0] === b[0] && a[1] >= b[1]), `${JSON.stringify(order[i - 1])} before ${JSON.stringify(order[i])}`);
       assert.equal(order[i].rank === order[i - 1].rank, a[0] === b[0] && a[1] === b[1]);
     }
-    const st = await (await fetch(`http://127.0.0.1:${gw}/status`)).json();
+    const st = await (await fetch(`http://127.0.0.1:${gw}/status.json`)).json();
     assert.ok('multiStandMatch' in st.gateway.queues);
   } finally { for (const p of procs) p.kill(); }
 });

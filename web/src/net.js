@@ -4,6 +4,20 @@
 // before the bets — the page replays the same fight from the line-ups and the seed (sim.js is shared). Opened as a
 // file, the page stays the offline demo. 自娱自乐 is always local.
 const NET = { on: /^https?:$/.test(location.protocol), lobby: null, match: null, me: null };
+const LOBBY_KEY = 'duel.lobby', ROOM_KEY = 'duel.room';
+const readSession = (key) => { try { return sessionStorage.getItem(key); } catch (e) { return null; } };
+const writeSession = (key, value) => { try { if (value == null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, value); } catch (e) { /* no storage */ } };
+function roomResume() {
+  try {
+    const room = JSON.parse(readSession(ROOM_KEY) || 'null');
+    return room && /^\d{6}$/.test(room.code || '') ? room : null;
+  } catch (e) { return null; }
+}
+const rememberRoom = (room) => {
+  const role = room.members?.some((p) => p.id === NET.me?.id) ? 'player' : room.spectators?.some((p) => p.id === NET.me?.id) ? 'spectator' : null;
+  writeSession(ROOM_KEY, role ? JSON.stringify({ code: room.code, role }) : null);
+};
+const forgetRoom = () => writeSession(ROOM_KEY, null);
 // a page opened as a file or with ?debug: the debug hooks (window.__flow.dbg), and no debug-match notice (recording)
 const PAGE_DEBUG = location.protocol === 'file:' || /[?&]debug(=|&|$)/.test(location.search);
 // this browser's own id (kept in its storage): the gateway gives one browser one seat in the public queues
@@ -89,8 +103,13 @@ class Link {
     m._at = performance.now() - (m.age || 0);
     if (m.t === 'pong') { if (Number.isFinite(m.c)) PING.got(m._at - m.c); return; }
     if (m.t === 'emoji') { EMO.receive(m); return; }
+    if (m.t === 'player.status') {
+      const p = players.find((x) => x.id === m.id);
+      if (p) Object.assign(p, { connected: !!m.connected, out: !!m.out, outRound: m.outRound || 0 });
+      return;
+    }
     if (this.intercept(m)) return;
-    const i = this.waiters.findIndex((w) => w.types.includes(m.t));
+    const i = this.waiters.findIndex((w) => w.types.includes(m.t) && (m.t === 'closed' || w.predicate(m)));
     if (i >= 0) this.waiters.splice(i, 1)[0].res(m); else this.q.push(m);
   }
   dropped(ws, e) {
@@ -122,20 +141,21 @@ class Link {
     else if (this.reconnecting && KEEP.includes(o.t)) this.outbox.push(o);
   }
   // the next message of one of the types (queued first); { t: 'timeout' } after `ms`, { t: 'closed' } when the link drops
-  next(types, ms) {
+  next(types, ms, predicate = () => true) {
     types = [].concat(types, 'closed');
-    const i = this.q.findIndex((m) => types.includes(m.t));
+    const matches = (m) => types.includes(m.t) && (m.t === 'closed' || predicate(m));
+    const i = this.q.findIndex(matches);
     if (i >= 0) return Promise.resolve(this.q.splice(i, 1)[0]);
     if (this.closed) return Promise.resolve({ t: 'closed' });
     return new Promise((res) => {
-      const w = { types, res };
+      const w = { types, predicate, res };
       this.waiters.push(w);
       if (ms) setTimeout(() => { const k = this.waiters.indexOf(w); if (k >= 0) { this.waiters.splice(k, 1); res({ t: 'timeout' }); } }, ms);
     });
   }
   // queued messages of a type, without waiting; take: the first one (or null)
   drain(type) { const out = this.q.filter((m) => m.t === type); this.q = this.q.filter((m) => m.t !== type); return out; }
-  take(type) { const i = this.q.findIndex((m) => m.t === type); return i >= 0 ? this.q.splice(i, 1)[0] : null; }
+  take(type, predicate = () => true) { const i = this.q.findIndex((m) => m.t === type && predicate(m)); return i >= 0 ? this.q.splice(i, 1)[0] : null; }
   close() { this.closing = true; this.reconnecting = false; try { this.ws.close(); } catch (e) { /* gone */ } this.end(); }
 }
 
@@ -226,14 +246,16 @@ async function moveLobby(host) {
 }
 async function connectLobby(name) {
   let live = false;
+  const resumeKey = readSession(LOBBY_KEY);
   const hello = () => ({ t: 'hello', name, avatar: myAvatar.value() || undefined, cid: clientId() });
   NET.lobby = new Link(`${wsBase()}/lobby`, {
     retry: C.maxRetryTimeInTeamRoom || 45, onstate: (st) => RECONNECT.state(st),
     reopen: (link) => ({ url: link.url, first: { t: 'resume', key: NET.me.key } }),
     intercept: (m) => {
       if (!live) return false;
-      if (m.t === 'welcome') { NET.me = m; return true; }
+      if (m.t === 'welcome') { NET.me = m; writeSession(LOBBY_KEY, m.key); return true; }
       if (m.t === 'resume.fail') {
+        writeSession(LOBBY_KEY, null);
         NET.lobby.send(hello());
         toast('大厅会话已失效，已重新登录', 3);
         for (const w of NET.lobby.waiters.splice(0)) w.res({ t: 'closed' });
@@ -243,9 +265,15 @@ async function connectLobby(name) {
     },
   });
   await NET.lobby.ready;
-  NET.lobby.send(hello());
-  const w = await NET.lobby.next('welcome', 8000);
+  NET.lobby.send(resumeKey ? { t: 'resume', key: resumeKey } : hello());
+  let w = await NET.lobby.next(resumeKey ? ['welcome', 'resume.fail'] : 'welcome', 8000);
+  if (w.t === 'resume.fail') {
+    writeSession(LOBBY_KEY, null);
+    NET.lobby.send(hello());
+    w = await NET.lobby.next('welcome', 8000);
+  }
   if (w.t !== 'welcome') throw new Error('大厅没有响应');
+  writeSession(LOBBY_KEY, w.key);
   NET.me = w; live = true;
   ME_NAME = w.name; ME_TAG = w.tag;
   PING.start();
@@ -298,14 +326,15 @@ async function joinMatch(m) {
   const h = await NET.match.next('hello', 8000);
   if (h.t !== 'hello') throw new Error('对战实例没有响应');
   applyMatchSnapshot(h);
-  G.role = role;
-  if (role === 'spectator') forgetSeat();
+  const actualRole = h.role || role;
+  G.role = actualRole;
+  if (actualRole === 'spectator' && !m.token) forgetSeat();
   G.online = true;
   G.debugMatch = !!h.debug; debugMark(G.debugMatch);
   if (G.debugMatch) { if (PAGE_DEBUG) console.info('debug match: seeds come with the line-ups'); else toast('这是一场调试模式的对局：服务器在押注前就公开了种子', 4); }
   G.mode = MODES.find((x) => x.id === h.mode) || G.mode;
   G.matchId = m.matchId;
-  if (role === 'player') try { sessionStorage.setItem(SEAT_KEY, JSON.stringify({ port: m.port, matchId: m.matchId, token: m.token, ...(WS_HOST !== location.host ? { host: WS_HOST } : {}) })); } catch (e) { /* no storage */ }
+  if (m.token) try { sessionStorage.setItem(SEAT_KEY, JSON.stringify({ port: m.port, matchId: m.matchId, token: m.token, ...(WS_HOST !== location.host ? { host: WS_HOST } : {}) })); } catch (e) { /* no storage */ }
   return h;
 }
 const forgetSeat = () => { debugMark(false); try { sessionStorage.removeItem(SEAT_KEY); } catch (e) { /* no storage */ } };
@@ -370,7 +399,9 @@ async function stMatchOnline(ctx) {
 // ---- 群组 rooms: create, or join with a code; the host switches NPC fill and starts --------------------------------------
 async function stRoomOnline(ctx) {
   let joinRole = null;
-  if (ctx.joinCode) {
+  const resumingRoom = !!ctx.resumingRoom;
+  ctx.resumingRoom = false;
+  if (ctx.joinCode && !resumingRoom) {
     const code = ctx.joinCode;
     for (;;) {
       NET.lobby.drain('room.info'); NET.lobby.drain('elsewhere'); NET.lobby.drain('error');
@@ -395,14 +426,23 @@ async function stRoomOnline(ctx) {
   scr.text('root_title/prefix', ''); scr.text('root_title/text_title', G.mode.name);
   scr.text('root_desc/text_desc1', G.mode.desc1); scr.text('root_desc/text_desc2', G.mode.desc2);
   watchPing(scr, 'delay_layout/text_delay', null, (t) => `当前延迟  ${t}`);
-  NET.lobby.drain('room');
-  if (ctx.joinCode) NET.lobby.send({ t: 'room.join', code: ctx.joinCode, role: joinRole }); else NET.lobby.send({ t: 'room.create', mode: G.mode.id, capacity: ctx.capacity });
+  let room = null, resumedState = null;
+  if (resumingRoom) {
+    const code = ctx.joinCode;
+    resumedState = NET.lobby.take('room') || await NET.lobby.next('room', 2000);
+    if (resumedState.t !== 'room' || resumedState.code !== code) { scr.close(); forgetRoom(); ctx.joinCode = null; return 'entry'; }
+    room = resumedState;
+    rememberRoom(resumedState);
+  } else {
+    NET.lobby.drain('room');
+    if (ctx.joinCode) NET.lobby.send({ t: 'room.join', code: ctx.joinCode, role: joinRole }); else NET.lobby.send({ t: 'room.create', mode: G.mode.id, capacity: ctx.capacity });
+  }
   let joined = !!ctx.joinCode;
   ctx.joinCode = null;
   playLoops(scr);
   scr.play('duel_room', 'in_room');
   const content = scr.one('scroll_view/viewport/content');
-  let room = null, result = null, startPending = false, roomT = DCFG.consts.maxRoomTime || 900;
+  let result = null, startPending = false, roomT = DCFG.consts.maxRoomTime || 900;
   const draw = (r) => {
     // the room's own mode (a code typed in the browser may lead to either 礼物对决 or 竞猜对决)
     const mode = MODES.find((x) => x.id === r.mode);
@@ -436,6 +476,7 @@ async function stRoomOnline(ctx) {
     scr.show('button_npc', !starting); scr.show('button_npc/root_normal', !r.npc); scr.show('button_npc/root_select', r.npc);
     phase(`群组房间 ${r.code} · ${r.members.length}/${r.max} 玩家 · ${(r.spectators || []).length} 观战${r.npc ? ' · NPC 补位' : ''}${starting ? ' · 正在开局' : host ? '（你是房主）' : '（等待房主开局）'}`);
   };
+  if (resumedState) draw(resumedState);
   scr.tap('button_npc', () => { if (room && !room.started && room.host === NET.me.id) NET.lobby.send({ t: 'room.npc', on: !room.npc }); else toast('只有房主可以设置 NPC 补位'); });
   scr.tap('root_roomid/button', () => {
     if (!room) return;
@@ -455,18 +496,18 @@ async function stRoomOnline(ctx) {
   const tick = setInterval(() => { roomT = Math.max(0, roomT - 1); scr.text('time_layout/text_time', mmss(roomT)); }, 1000);
   while (!result) {
     const m = await NET.lobby.next(['room', 'matched', 'error', 'elsewhere'], 300);
-    if (m.t === 'room') { room = m; if (!m.started) startPending = false; draw(m); }
+    if (m.t === 'room') { room = m; rememberRoom(m); if (!m.started) startPending = false; draw(m); }
     else if (m.t === 'elsewhere') {
       // the room is on another node: join it there
       if (!nodeHost(m.host)) { toast('这个房间在另一台服务器上，请从游戏入口页进入后再加入', 4); result = 'back'; continue; }
       try { await moveLobby(m.host); NET.lobby.send({ t: 'room.join', code: m.code, role: joinRole || 'player' }); joined = true; } catch (e) { toast('无法连接房间所在的服务器', 3); result = 'back'; }
     }
-    else if (m.t === 'matched') { try { await joinMatch(m); result = matchState(G.current); } catch (e) { toast(e.message, 3); } }
+    else if (m.t === 'matched') { forgetRoom(); try { await joinMatch(m); result = matchState(G.current); } catch (e) { toast(e.message, 3); } }
     else if (m.t === 'error') { toast(m.msg, 3); if (!room) result = 'back'; else { startPending = false; draw(room); } }
     else if (m.t === 'closed') { toast('与大厅的连接已断开', 3); result = 'back'; }
   }
   clearInterval(tick);
-  if (result === 'back') NET.lobby.send({ t: 'room.leave' });
+  if (result === 'back') { NET.lobby.send({ t: 'room.leave' }); forgetRoom(); }
   // out of another node's room: back to the page's own node for the queues and new rooms
   if (result === 'back' && WS_HOST !== location.host) { try { await moveLobby(location.host); } catch (e) { toast('与大厅的连接已断开', 3); } }
   scr.close();
@@ -579,7 +620,7 @@ async function stGameOnline() {
       G.log[G.log.length - 1].seed = G.battleSeed;
       reseedRound(G.battleSeed);
     }
-    const w = await battlePhase(r, true, battleSnapshot ? { ...battleSnapshot, at: G.currentAt } : null);
+    const w = await battlePhase(r, true, battleSnapshot ? { ...battleSnapshot, at: G.currentAt } : null, rd.roundId);
     current = null;
     if (w === 'sync') { current = G.current; G.current = null; continue; }
     const res = G.serverResult;

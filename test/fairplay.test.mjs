@@ -20,8 +20,9 @@ function fakeSeat(m, p) {
   const ws = { readyState: 1, send: (x) => {
     const msg = JSON.parse(x); msg.at = Date.now() - s.t0; s.got.push(msg);
     if (msg.t === 'round' && s.onRound) s.onRound(msg);
+    if (msg.t === 'round') setImmediate(() => m.onMessage(p, { t: 'round.ready', r: msg.r }));
     if (msg.t === 'battle') setTimeout(() => m.onMessage(p, { t: 'watched' }), 10);
-  },
+  }, ping() {},
     on: (ev, fn) => { s.h[ev] = fn; }, close: (code) => { s.closed = code; } };
   m.attach(ws, p.token);
   s.say = (o) => s.h.message(JSON.stringify(o));
@@ -41,8 +42,11 @@ test('a round: no seed before the bets close; the seed and salt then match the c
     setTimeout(() => s.say({ t: 'bet', side: 1, kind: 'normal' }), 2000);
   };
   await m.playRound(SIM.roundTable('multiOperationMatch')[0][0], 1);
-  const round = s.got.find((x) => x.t === 'round'), battle = s.got.find((x) => x.t === 'battle'), result = s.got.find((x) => x.t === 'result');
+  const round = s.got.find((x) => x.t === 'round'), start = s.got.find((x) => x.t === 'round.start'), battle = s.got.find((x) => x.t === 'battle'), result = s.got.find((x) => x.t === 'result');
+  assert.equal(start.r, round.r); assert.equal(start.roundId, round.roundId);
   assert.equal(round.seed, undefined); assert.equal(round.salt, undefined); assert.match(round.commit, /^[0-9a-f]{64}$/);
+  assert.equal(battle.r, round.r); assert.equal(battle.roundId, round.roundId);
+  assert.equal(result.r, round.r); assert.equal(result.roundId, round.roundId);
   assert.ok(Number.isInteger(battle.seed)); assert.match(battle.salt, /^[0-9a-f]{32}$/);
   assert.equal(commitOf(battle.seed, battle.salt), round.commit);
   const lineups = round.lineups.map((side) => side.map(([k, n]) => ({ f: SIM.POOL.find((f) => f.key === k), n })));

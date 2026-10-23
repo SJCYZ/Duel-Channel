@@ -13,7 +13,8 @@ test('a seat connecting late still plays from the first round', { timeout: 60000
   // a client's socket: it answers loading with ready
   const ws = Object.assign(new EventEmitter(), {
     readyState: 1,
-    send(s) { const j = JSON.parse(s); got.push(j.t); if (j.t === 'phase' && j.name === 'loading') setImmediate(() => ws.emit('message', JSON.stringify({ t: 'ready' }))); },
+    send(s) { const j = JSON.parse(s); got.push(j.t); if (j.t === 'phase' && j.name === 'loading') setImmediate(() => ws.emit('message', JSON.stringify({ t: 'ready' }))); if (j.t === 'round') setImmediate(() => ws.emit('message', JSON.stringify({ t: 'round.ready', r: j.r }))); if (j.t === 'battle') setImmediate(() => ws.emit('message', JSON.stringify({ t: 'watched' }))); },
+    ping() {},
     close() { ws.readyState = 3; },
   });
   const run = m.run();
@@ -36,11 +37,13 @@ async function until(f, ms = 15000) {
   while (!f()) { if (Date.now() > end) throw new Error('timed out'); await sleep(50); }
 }
 // a client's socket: it keeps what it is sent and answers loading with ready
-function socket() {
+function socket({ autoPong = true } = {}) {
   const ws = Object.assign(new EventEmitter(), {
-    readyState: 1, got: [],
-    send(s) { const j = JSON.parse(s); ws.got.push(j); if (j.t === 'phase' && j.name === 'loading') setImmediate(() => ws.emit('message', JSON.stringify({ t: 'ready' }))); },
+    readyState: 1, got: [], pings: 0,
+    send(s) { const j = JSON.parse(s); ws.got.push(j); if (j.t === 'phase' && j.name === 'loading') setImmediate(() => ws.emit('message', JSON.stringify({ t: 'ready' }))); if (j.t === 'round') setImmediate(() => ws.emit('message', JSON.stringify({ t: 'round.ready', r: j.r }))); if (j.t === 'battle') setImmediate(() => ws.emit('message', JSON.stringify({ t: 'watched' }))); },
+    ping() { ws.pings++; if (autoPong) setImmediate(() => ws.emit('pong')); },
     close() { ws.readyState = 3; },
+    terminate() { ws.readyState = 3; setImmediate(() => ws.emit('close')); },
     lastSeq() { return Math.max(-1, ...ws.got.filter((j) => Number.isInteger(j.seq)).map((j) => j.seq)); },
   });
   return ws;
@@ -88,4 +91,65 @@ test('the only viewer leaves: the match ends without waiting', { timeout: 60000 
   assert.ok(m.done);
   assert.ok(!logs.some((l) => /every viewer dropped/.test(l)), logs.join('\n'));
   assert.ok(Date.now() - t0 < 15000, 'no 30 s wait for a viewer who left');
+});
+
+test('out seats do not block the initial loading barrier', { timeout: 5000 }, async () => {
+  const { Match } = await import('../server/game.mjs');
+  const m = new Match({ id: 'out-barrier', mode: 'multiOperationMatch', humans: [{ name: 'ready', avatar: null }, { name: 'out', avatar: null }, { name: 'dropped', avatar: null }], npcFill: false });
+  const [ready, out, dropped] = m.players;
+  ready.connected = true; ready.ready = true;
+  out.connected = true; out.out = true;
+  dropped.connected = false;
+  assert.equal(await m.waitHumans((p) => p.ready, 20), true, 'out and disconnected seats are excluded from the loading barrier');
+});
+
+test('out and disconnected seats do not block round preparation', { timeout: 5000 }, async () => {
+  Object.assign(process.env, { DUEL_BET_MS: '10', DUEL_RESULT_MS: '1', DUEL_RANK_MS: '1' });
+  const { Match, SIM } = await import('../server/game.mjs');
+  const m = new Match({ id: 'out-round-barrier', mode: 'multiOperationMatch', humans: [{ name: 'ready', avatar: null }, { name: 'out', avatar: null }, { name: 'dropped', avatar: null }], npcFill: false });
+  const [ready, out, dropped] = m.players;
+  const ws = socket();
+  m.attach(ws, ready.token);
+  const playing = m.playRound(SIM.roundTable('multiOperationMatch')[0][0], 1);
+  await until(() => m.phase === 'prepare');
+  ready.roundReady = 1;
+  out.connected = true; out.out = true;
+  dropped.connected = false;
+  await sleep(200);
+  const enteredBet = ws.got.some((msg) => msg.t === 'round.start');
+  ready.left = true; out.left = true; dropped.left = true;
+  await playing;
+  assert.ok(enteredBet, 'the connected eligible player is released from the barrier');
+});
+
+test('two heartbeat interruptions eliminate the seat and reconnect as a spectator', { timeout: 10000 }, async () => {
+  Object.assign(process.env, { DUEL_HEARTBEAT_MS: '100', DUEL_SHOW_MS: '10', DUEL_BET_MS: '1000', DUEL_RESULT_MS: '1', DUEL_RANK_MS: '1' });
+  const { Match } = await import('../server/game.mjs');
+  const m = new Match({ id: 'heartbeat-out', mode: 'multiOperationMatch', humans: [{ name: 'unstable', avatar: null }, { name: 'stable', avatar: null }], npcFill: false });
+  const token = m.tokens()[0].token, seat = m.players[0], first = socket({ autoPong: false });
+  const stable = socket();
+  m.attach(stable, m.tokens()[1].token);
+  const run = m.run();
+  try {
+    m.attach(first, token);
+    await until(() => first.pings > 0, 3000);
+    await until(() => seat.interruptions === 1, 3000);
+    assert.equal(seat.out, false, 'the first interruption leaves the player eligible');
+
+    const second = socket({ autoPong: false });
+    m.attach(second, token);
+    await until(() => second.pings > 0, 3000);
+    await until(() => seat.out, 3000);
+    assert.equal(seat.interruptions, 2);
+    assert.equal(seat.connected, false);
+
+    const rejoined = socket();
+    m.attach(rejoined, token);
+    assert.equal(rejoined.got.find((msg) => msg.t === 'hello')?.role, 'spectator');
+  } finally {
+    seat.left = true; m.players[1].left = true;
+    if (seat.ws) { seat.ws.readyState = 3; seat.ws.emit?.('close'); }
+    stable.readyState = 3; stable.emit('close');
+    await run;
+  }
 });

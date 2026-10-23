@@ -281,7 +281,7 @@ function roomCodeFrom(value) {
   return /(?:^|\/)(\d{6})\/?$/.exec(url.pathname)?.[1] || null;
 }
 async function stEntry(ctx) {
-  let inviteCode = NET.on ? roomCodeFrom(location.href) : null;
+  let inviteCode = NET.on ? (ctx.resumeRoom ? ctx.joinCode : roomCodeFrom(location.href)) : null;
   phase('入口 · 登录');
   const scr = new Screen('enemy_duel_entry_page', { z: 5 });
   scr.text('name_layout/text_name', me.name);
@@ -317,7 +317,7 @@ async function stEntry(ctx) {
     if (r !== 'search') break;
     const code = inviteCode || await searchDialog();
     inviteCode = null;
-    if (code) { ctx.joinCode = code; G.mode = MODES_ROOM.find((m) => m.type === 'OPERATION') || G.mode; break; }
+    if (code) { ctx.joinCode = code; ctx.resumingRoom = !!ctx.resumeRoom; ctx.resumeRoom = false; G.mode = MODES_ROOM.find((m) => m.type === 'OPERATION') || G.mode; break; }
   }
   if (r === 'search') {
     await scr.play('panel_browser', 'act1enemyduel_entry_browser_close');
@@ -886,7 +886,8 @@ async function betPhase(r, rd, lineups, winner, net = null) {
     if (G.role !== 'spectator') NET.match.send({ t: 'round.ready', r });
     let start;
     do {
-      start = await NET.match.next(['round.start', 'sync']);
+      start = await NET.match.next(['round.start', 'sync'], undefined,
+        (m) => m.t === 'sync' || (m.r === r && m.roundId === rd.roundId));
       if (start.t === 'sync') { applyMatchSnapshot(start); scr.close(); return 'sync'; }
       if (start.t === 'closed') { scr.close(); return 'closed'; }
     } while (start.r !== r);
@@ -908,7 +909,7 @@ async function betPhase(r, rd, lineups, winner, net = null) {
       for (const m of NET.match.drain('bets')) for (const [id, ch] of Object.entries(m.choices)) { const p = players.find((x) => x.id === id); if (p && !p.me) { p.choice = ch; upd = true; } }
       for (const m of NET.match.drain('error')) toast(m.msg);
       if (NET.match.drain('secret').length) goSecret();
-      const fin = NET.match.take('battle');
+      const fin = NET.match.take('battle', (m) => m.r === r && m.roundId === rd.roundId);
       // the bets closed: every pick, and the battle's seed (with its salt, for the commitment)
       if (fin) { for (const p of players) p.choice = fin.choices[p.id] || null; net.final = true; upd = true; G.battleAt = fin._at; G.battleSeed = fin.seed; G.battleSalt = fin.salt; }
       const sync = NET.match.take('sync');
@@ -946,7 +947,7 @@ async function betPhase(r, rd, lineups, winner, net = null) {
   await wait(0.6);
   await fadeOut(scr, 0.3);
 }
-async function battlePhase(r, online = false, current = null) {
+async function battlePhase(r, online = false, current = null, roundId = null) {
   phase(`第 ${r} 轮 · 比赛中`);
   const scr = new Screen('battle_state', { z: 20 });
   scr.show('panel_waiting', false);
@@ -976,7 +977,8 @@ async function battlePhase(r, online = false, current = null) {
     // Start at the server's current time when joining during a battle; seekTo suppresses all past visual events.
     if (current) seekTo((current.elapsedMs || 0) + Math.max(0, performance.now() - (current.at || performance.now())));
     const done = startBattle(!!current);
-    const incoming = NET.match.next(['result', 'finish', 'sync']);
+    const incoming = NET.match.next(['result', 'finish', 'sync'], undefined,
+      (m) => m.t === 'finish' || m.t === 'sync' || (m.r === r && m.roundId === roundId));
     const first = await Promise.race([done.then((w) => ({ t: 'sim', w })), incoming]);
     if (first.t === 'sync') {
       arena.running = false;
@@ -1556,7 +1558,9 @@ async function boot() {
       if (!FRAME.touch) setTimeout(() => nick.focus(), 900);
       nick.onkeydown = (e) => { if (e.key === 'Enter') $('start').click(); };
     }
-    await new Promise((res) => { $('start').onclick = (e) => { if (!e.target.closest('#nickrow, a')) res(); }; });
+    let resumeTarget = false;
+    try { resumeTarget = NET.on && !!(sessionStorage.getItem('duel.seat') || sessionStorage.getItem('duel.room')); } catch (e) { /* no storage */ }
+    if (!resumeTarget) await new Promise((res) => { $('start').onclick = (e) => { if (!e.target.closest('#nickrow, a')) res(); }; });
     startStatus('正在载入声音……');
     try { await initSound(); } catch (e) { console.warn('sound', e); }
     if (NET.on) {
@@ -1568,6 +1572,11 @@ async function boot() {
     }
     // a reloaded page whose tab was in a match: straight back into it
     const back = NET.on ? await rejoinMatch() : null;
+    if (back) forgetRoom();
+    else if (NET.on && NET.me?.resumed && roomResume()) {
+      FLOW.ctx.joinCode = roomResume().code;
+      FLOW.ctx.resumeRoom = true;
+    } else forgetRoom();
     $('start').hidden = true;
     let st = back || 'entry';
     for (;;) st = await STATES[st](FLOW.ctx);
