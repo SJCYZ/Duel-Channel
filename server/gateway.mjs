@@ -250,7 +250,11 @@ function roomState(r) {
   const viewer = (m) => ({ id: m.id, name: m.name, tag: m.tag, avatar: m.avatar, away: !m.ws });
   return { t: 'room', code: r.code, mode: r.mode, npc: r.npc, started: r.started, max: r.capacity, host: r.host?.id || null, members: r.members.map(viewer), spectators: r.spectators.map(viewer) };
 }
-function pushRoom(r) { const st = roomState(r); for (const m of [...r.members, ...r.spectators]) send(m, st); }
+function pushRoom(r) {
+  if (!r.host?.ws) r.host = r.members.find((m) => m.ws) || r.members[0] || null;
+  const st = roomState(r);
+  for (const m of [...r.members, ...r.spectators]) send(m, st);
+}
 function leaveRoom(s) {
   const r = s.room && rooms.get(s.room);
   s.room = null; if (s.state === 'room') s.state = 'idle';

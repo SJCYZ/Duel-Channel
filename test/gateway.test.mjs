@@ -98,10 +98,14 @@ test('public edge: /status.json accepts local and Tailscale Serve requests while
   } finally { gw.stop(); rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('the lobby: a dropped viewer keeps their room seat and takes the session back with its key', { timeout: 30000 }, async () => {
+test('the lobby: an online guest takes over a disconnected room host and can start the match', { timeout: 30000 }, async () => {
   const { default: WebSocket } = await import('ws');
   const dir = mkdtempSync(join(tmpdir(), 'duel-pub-'));
-  const gw = await gateway(dir);
+  const ip = await free();
+  const inst = spawn(process.execPath, [fileURLToPath(new URL('../server/instance.mjs', import.meta.url))],
+    { env: { ...process.env, PORT: String(ip), HOST: '127.0.0.1', DUEL_LOGS: join(dir, 'logs') }, stdio: 'ignore' });
+  for (let i = 0; i < 100; i++) { try { await get(ip, '/status'); break; } catch (e) { await new Promise((r) => setTimeout(r, 100)); } }
+  const gw = await gateway(dir, join(dir, 'logs'), { INSTANCES: String(ip) });
   const open = () => new Promise((res, rej) => {
     const ws = new WebSocket(`ws://127.0.0.1:${gw.port}/lobby`), q = [], waits = [];
     ws.on('message', (d) => { const m = JSON.parse(d); const i = waits.findIndex((w) => w.t === m.t); if (i >= 0) waits.splice(i, 1)[0].res(m); else q.push(m); });
@@ -116,27 +120,32 @@ test('the lobby: a dropped viewer keeps their room seat and takes the session ba
     a.say({ t: 'room.create', mode: 'multiOperationRoom' });
     const room = await a.next('room');
     const b = await open();
-    b.say({ t: 'hello', name: '房客' }); await b.next('welcome');
+    b.say({ t: 'hello', name: '房客' });
+    const wb = await b.next('welcome');
     b.say({ t: 'room.join', code: room.code });
     await b.next('room');
     // the host's connection drops: the guest sees them away, still in the room
     a.ws.terminate();
     const seen = await b.next('room');
     assert.equal(seen.members.find((m) => m.id === wa.id).away, true);
-    // back on a new connection with the key: the same session, the same room
+    assert.equal(seen.host, wb.id, 'an online room member takes over immediately');
+    b.say({ t: 'room.start' });
+    const matched = await b.next('matched');
+    assert.equal(matched.role, 'player');
+    assert.ok(matched.matchId);
+    // the original host can resume the same session and receive the match seat held while disconnected
     const a2 = await open();
     a2.say({ t: 'resume', key: wa.key });
     const back = await a2.next('welcome');
     assert.equal(back.id, wa.id); assert.equal(back.resumed, true);
-    const room2 = await a2.next('room');
-    assert.equal(room2.code, room.code); assert.equal(room2.host, wa.id);
-    assert.equal(room2.members.find((m) => m.id === wa.id).away, false);
+    const resumedMatch = await a2.next('matched');
+    assert.equal(resumedMatch.matchId, matched.matchId);
     // a key the gateway does not know
     const c = await open();
     c.say({ t: 'resume', key: '0'.repeat(24) });
     assert.equal((await c.next('resume.fail')).t, 'resume.fail');
     for (const x of [a2, b, c]) x.ws.close();
-  } finally { gw.stop(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { gw.stop(); inst.kill(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('a match connection through the gateway: relayed to its instance, close codes kept, nothing else dialled', { timeout: 30000 }, async () => {
