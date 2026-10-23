@@ -248,7 +248,7 @@ setInterval(() => { for (const m of QUEUE_MODES) matchQueue(m); }, 500);
 const rooms = new Map();
 function roomState(r) {
   const viewer = (m) => ({ id: m.id, name: m.name, tag: m.tag, avatar: m.avatar, away: !m.ws });
-  return { t: 'room', code: r.code, mode: r.mode, npc: r.npc, max: r.capacity, host: r.host?.id || null, members: r.members.map(viewer), spectators: r.spectators.map(viewer) };
+  return { t: 'room', code: r.code, mode: r.mode, npc: r.npc, started: r.started, max: r.capacity, host: r.host?.id || null, members: r.members.map(viewer), spectators: r.spectators.map(viewer) };
 }
 function pushRoom(r) { const st = roomState(r); for (const m of [...r.members, ...r.spectators]) send(m, st); }
 function leaveRoom(s) {
@@ -454,7 +454,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify({ gateway: { port: PORT, pid: process.pid, sessions: sessions.size, relays, limits: LIMIT, playing: playing.size, queues: Object.fromEntries(QUEUE_MODES.map((m) => [m, queues[m].map((s) => s.name)])), errors: recentErrors(), reports: reportCount() },
       // room codes are available only to local or Tailscale Serve clients: anyone else could walk into a private room
-      rooms: [...rooms.values()].map((r) => ({ ...(local || tailscale ? { code: r.code } : {}), mode: r.mode, host: r.host?.name || null, members: r.members.map((m) => m.name), spectators: r.spectators.length, max: r.capacity, npc: r.npc })),
+      rooms: [...rooms.values()].map((r) => ({ ...(local || tailscale ? { code: r.code } : {}), mode: r.mode, host: r.host?.name || null, members: r.members.map((m) => m.name), spectators: r.spectators.length, max: r.capacity, npc: r.npc, started: r.started })),
       instances: [...inst.values()].map((i) => ({ port: i.port, up: i.up, matches: i.matches, players: i.players, list: i.list })), history }, null, 1));
     return;
   }

@@ -268,9 +268,20 @@ function trimEntry(scr) {
   const tlv = n('group_lower_dec/viedo_timeline'); if (tlv) tlv.rt.size[0] += 2 * dx;
   for (const k of ['group_lower_dec/pause', 'group_lower_dec/streaming', 'group_video/video_tuber']) { const x = n(k); if (x) x.rt.pos[0] -= dx; }
 }
+function roomCodeFrom(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  if (/^\d{6}$/.test(text)) return text;
+  let url;
+  try { url = new URL(text, location.href); } catch (e) { return null; }
+  if (url.searchParams.has('room')) {
+    const code = url.searchParams.get('room');
+    return /^\d{6}$/.test(code || '') ? code : null;
+  }
+  return /(?:^|\/)(\d{6})\/?$/.exec(url.pathname)?.[1] || null;
+}
 async function stEntry(ctx) {
-  let inviteCode = NET.on ? new URLSearchParams(location.search).get('room') : null;
-  if (!/^\d{6}$/.test(inviteCode || '')) inviteCode = null;
+  const inviteCode = NET.on ? roomCodeFrom(location.href) : null;
   phase('入口 · 登录');
   const scr = new Screen('enemy_duel_entry_page', { z: 5 });
   scr.text('name_layout/text_name', me.name);
