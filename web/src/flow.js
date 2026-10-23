@@ -1021,7 +1021,11 @@ function settle(r, rd, w) {
 // 竞猜对决's standings onto the viewers (the server sends its own; offline the same rule)
 function standRankAll() { const rk = standRanks(players); for (const p of players) p.rank = rk[p.id]; }
 async function roundEnd(r, w) {
-  const scr = new Screen('round_end_state', { z: 22 });
+  const scr = new Screen('round_end_state', { z: 22, init: {
+    group_left_win: false, group_right_win: false, group_draw: false,
+    'group_state/right': false, 'group_state/lose': false, 'group_state/sorry': false,
+    'group_avatar/left': false, 'group_avatar/right': false,
+  } });
   scr.show('group_left_win', w === 0); scr.show('group_right_win', w === 1); scr.show('group_draw', w === 'draw');
   if (G.role === 'spectator') {
     scr.show('group_state/sorry', true);
@@ -1070,8 +1074,7 @@ async function roundEnd(r, w) {
 }
 async function scoreboard(r) {
   phase(`第 ${r} 轮 · 计分板`);
-  const scr = new Screen('operation_rank_state', { z: 22 });
-  scr.show('panel_second_confirm', false);
+  const scr = new Screen('operation_rank_state', { z: 22, init: { panel_second_confirm: false } });
   scr.text('group_text/text_bg/text_title_name', r < ROUNDS ? `第 ${r} / ${ROUNDS} 轮` : '最终排名');
   const rk = ranked();
   for (let i = 1; i <= 10; i++) {
@@ -1125,7 +1128,7 @@ async function scoreboard(r) {
 const STAND_GRID = { cell: [115, 152], gap: [10.5, 12], cols: 10 };
 async function standBoard(r, list, { last = false, seats = list.length } = {}) {
   phase(last ? '竞猜对决 · 最终排名' : `第 ${r} 轮 · 竞猜结算`);
-  const scr = new Screen('stand_rank_state', { z: 22 });
+  const scr = new Screen('stand_rank_state', { z: 22, init: { popup_window: false } });
   const protectedRound = r <= (C.modeStandShieldTurn ?? 5);
   scr.text('group_text/text_bg/text_title_name', last ? '最终排名' : `第 ${r} 轮`);
   scr.text('player_num/title_layout_max/title_layout_min/text_left', String(list.filter((p) => !p.out).length));
@@ -1165,7 +1168,6 @@ async function standBoard(r, list, { last = false, seats = list.length } = {}) {
   // 离开比赛 asks first (the popup by the button)
   let leave = false;
   const popup = scr.one('popup_window');
-  popup.active = false;
   scr.text('popup/bg/text_info', '确定要离开比赛吗？');
   if (G.role !== 'spectator') {
     scr.tap('btn_leavegame/hotspot', () => { popup.active = true; scr.play('popup', 'enemyduel_turn_settlement_popup_in'); });
@@ -1265,8 +1267,12 @@ function finishReward(rank) {
 async function stFinish() {
   phase('最终结算');
   let scr;
-  await wipe(async () => { clearArena(); scr = new Screen('enemy_duel_battle_finish_view', { z: 40 }); }, '比赛结束');
-  if (G.role === 'spectator') {
+  const spectator = G.role === 'spectator', left = !spectator && !!G.left;
+  await wipe(async () => { clearArena(); scr = new Screen('enemy_duel_battle_finish_view', { z: 40, init: {
+    'state_toggle/leave': left, 'state_toggle/finish': !left,
+    group_left: !spectator, 'group_down/group_reward': !spectator,
+  } }); }, '比赛结束');
+  if (spectator) {
     const order = standMode() ? players.slice().sort((a, b) => (a.rank || 999) - (b.rank || 999)) : ranked();
     const content = scr.one('rank_list/scroll_list/viewport/content');
     clearKids(content);
@@ -1296,7 +1302,6 @@ async function stFinish() {
   const rk = stand ? players.slice().sort((a, b) => a.rank - b.rank) : ranked(), myRank = stand ? me.rank : rk.indexOf(me) + 1;
   scr.text('title_part/text_title', G.left ? '已离开比赛' : '比赛结束');
   if (ART[G.mode.key]) scr.image('panel_bg/img_bg', ART[G.mode.key].bg, null, 'cover');
-  scr.show('state_toggle/leave', !!G.left); scr.show('state_toggle/finish', !G.left);
   const content = scr.one('rank_list/scroll_list/viewport/content');
   clearKids(content);
   const items = rk.map((p, i) => {
