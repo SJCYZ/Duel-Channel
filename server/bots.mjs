@@ -65,7 +65,10 @@ function bot(i) {
       ws.on('message', async (d) => {
         const m = JSON.parse(d);
         if (m.seq) { if (m.seq <= lastSeq) return; lastSeq = m.seq; }
-        if (m.t === 'hello') me = m.you;
+        if (m.t === 'hello') {
+          me = m.you;
+          if (m.current?.phase === 'prepare') say(cur, { t: 'round.ready', r: m.current.round?.r });
+        }
         else if (m.t === 'emoji') {
           if (!/^pic_[a-z]+$/.test(m.pic) || m.pic === 'pic_nonexistent') seen.bad++;
           else if (m.id !== me) seen.others++;
@@ -74,6 +77,8 @@ function bot(i) {
         else if (m.t === 'phase' && m.name === 'loading') { await sleep(rnd(500, 2500)); say(cur, { t: 'ready' }); }
         else if (m.t === 'round') {
           rounds.add(m.r);
+          say(cur, { t: 'round.ready', r: m.r });
+        } else if (m.t === 'round.start') {
           if (dropMode && !drops && m.r === 3) {
             drops++;
             ws.terminate();

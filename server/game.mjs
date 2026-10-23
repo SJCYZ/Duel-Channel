@@ -64,7 +64,7 @@ export class Match {
     const base = () => ({ pts: C.modeOperationInitialScore || 10000, out: false, outRound: 0, streak: 0, stats: { all: 0, normal: 0, skip: 0, forced: 0 },
       played: 0, change: 0, right: null, lastForced: false, choice: null, left: false, ...(this.stand ? SIM.standSeat() : {}) });
     this.players = humans.map((h, i) => ({ id: 'p' + (i + 1), name: h.name, tag: h.tag, avatar: h.avatar, cid: h.cid || null, human: true, npc: null, token: token(),
-      ws: null, connected: false, ready: false, watched: false, ...base() }));
+      ws: null, connected: false, ready: false, roundReady: 0, watched: false, ...base() }));
     if (npcFill) {
       const pool = Object.values(SIM.DCFG.npcs), chosen = [];
       while (this.players.length + chosen.length < max && chosen.length < pool.length) chosen.push(SIM.pickWeighted(pool.filter((x) => !chosen.includes(x)), (x) => x.npcProb || 1, Math.random));
@@ -149,11 +149,12 @@ export class Match {
   }
   onMessage(p, m) {
     if (m.t === 'ready') p.ready = true;
+    else if (m.t === 'round.ready' && this.phase === 'prepare' && m.r === this.r) p.roundReady = m.r;
     else if (m.t === 'watched') p.watched = true;
     else if (m.t === 'leave') {
       p.left = true; this.log(`${p.name} left`);
       // 竞猜对决: leaving while still in is OUT, in the round being played or else the next
-      if (this.stand) SIM.standLeave(p, ['bet', 'battle'].includes(this.phase) ? this.r : this.r + 1);
+      if (this.stand) SIM.standLeave(p, ['prepare', 'bet', 'battle'].includes(this.phase) ? this.r : this.r + 1);
     }
     else if (m.t === 'bet') this.bet(p, m);
     else if (m.t === 'emoji') this.emoji(p, m.pic);
@@ -272,12 +273,15 @@ export class Match {
     const lrng = SIM.mulberry32(lineupSeed ^ 0x5bd1e995), lineups = SIM.makeLineups(rd, lrng), traps = SIM.makeTraps(rd, lrng);
     const pred = SIM.predict(lineups, seed, traps);
     for (const p of this.players) { p.choice = null; p.watched = false; p.betN = 0; }
-    this.setPhase('bet'); this.secret = false; this.seen = null; this.publicChoices = {}; this.battleResult = null; this.battleSeed = null; this.battleSalt = null; this.battleStartAt = null;
+    this.setPhase('prepare'); this.secret = false; this.seen = null; this.publicChoices = {}; this.battleResult = null; this.battleSeed = null; this.battleSalt = null; this.battleStartAt = null;
+    for (const p of this.players) p.roundReady = 0;
     const secretMs = Math.min(T.bet, env('DUEL_SECRET_MS', ((stand ? C.modeStandSelectTimeLast : C.modeOperationSelectTimeLast) || 7) * 1000)), openMs = T.bet - secretMs;
     this.currentRound = { r, roundId: rd.roundId, lineups: lineups.map((s) => s.map((g) => [g.f.key, g.n])), traps, commit: commitOf(seed, salt), betMs: T.bet, secretMs,
       ...(DEBUG ? { seed, salt } : {}) };
     this.bcast({ t: 'round', r, roundId: rd.roundId, lineups: lineups.map((s) => s.map((g) => [g.f.key, g.n])), traps, commit: commitOf(seed, salt), betMs: T.bet, secretMs,
       ...(DEBUG ? { seed, salt } : {}) });
+    while (this.humans().some((p) => p.connected && !p.left && p.roundReady !== r)) await sleep(100);
+    this.setPhase('bet'); this.bcast({ t: 'round.start', r, betMs: T.bet, secretMs });
     // the NPC viewers: the FOLLOW_* ones (priority > 0) see the supporters as everyone could when the window turned
     // secret; the informed ones (their pick uses the outcome) decide in the secret window, the rest while picks show
     const sup = () => this.seen || this.supporters();

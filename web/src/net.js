@@ -61,7 +61,7 @@ function debugMark(on) {
 }
 // A server connection with a message queue the flow reads in order (next / drain / take). Reopened match connections
 // receive a fresh hello snapshot; numbered broadcasts after it still use seq deduplication.
-const KEEP = ['bet', 'watched', 'ready', 'leave'];
+const KEEP = ['bet', 'watched', 'ready', 'round.ready', 'leave'];
 class Link {
   constructor(url, { retry = 0, reopen = null, onstate = () => {}, intercept = () => false } = {}) {
     this.url = url; this.q = []; this.waiters = []; this.closed = false; this.seq = 0; this.outbox = [];
@@ -270,11 +270,13 @@ function applyServerPlayers(list) {
 }
 // a player or spectator connects through the gateway. Players keep a seat token; observers reconnect with their room code.
 const SEAT_KEY = 'duel.seat';
-const matchState = (current) => ({ wait: 'wait', show: 'show', loading: 'loading', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[current?.phase] || 'show');
+const matchState = (current) => ({ wait: 'wait', show: 'show', loading: 'loading', prepare: 'game', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[current?.phase] || 'show');
 function applyMatchSnapshot(h) {
+  if (NET.match && Number.isInteger(h.seq)) NET.match.q = NET.match.q.filter((m) => !m.seq || m.seq > h.seq);
   players = h.players.map((s) => serverPlayer(s, h.you));
   G.role = h.role || G.role || 'player';
   me = G.role === 'player' ? players.find((p) => p.me) : null;
+  G.battleSeed = null; G.battleSalt = null; G.battleAt = 0; G.serverResult = null;
   G.current = h.current;
   G.currentAt = performance.now();
   G.matchOver = h.current?.phase === 'finish';
@@ -533,39 +535,43 @@ async function stGameOnline() {
       if (leaveResult) { if (G.role !== 'spectator') { NET.match.send({ t: 'leave' }); forgetSeat(); } left = true; break; }
       current = null;
       continue;
-    } else if (current?.round && ['bet', 'battle'].includes(current.phase)) {
+    } else if (current?.round && ['prepare', 'bet', 'battle'].includes(current.phase)) {
       m = { ...current.round, ...(current.phase === 'battle' ? { seed: current.seed, salt: current.salt, choices: current.publicChoices } : {}) };
     } else {
       m = await NET.match.next(['round', 'finish', 'sync']);
       if (m.t === 'sync') { applyMatchSnapshot(m); current = G.current; G.current = null; continue; }
       if (m.t !== 'round') { if (m.t === 'finish') { applyServerPlayers(m.players); G.matchOver = true; forgetSeat(); } else toast('与对战实例的连接已断开', 3); break; }
+      current = null;
     }
+    const snapshot = current?.round && ['prepare', 'bet', 'battle'].includes(current.phase) ? current : null;
     const rd = DCFG.rounds[m.roundId], r = m.r;
     G.round = r;
     // 竞猜对决: past round 5 nobody holds a shield (the instance does the same; its next snapshot says so)
-    if (stand && !current) standShields(players, r);
+    if (stand && !snapshot) standShields(players, r);
     const lineups = m.lineups.map((s) => s.map(([k, n]) => ({ f: byKey(k), n })));
     const traps = Array.isArray(m.traps) ? m.traps : [];
     G.log.push({ r, seed: m.seed, lineups: lineups.map((x) => x.map((g) => `${g.f.name}×${g.n}`).join(' + ')), traps, cost: lineups.map(sideScore), len: 0 });
     // the battle's seed comes as the bets close (a debug match sends it now): the line-up stands on a stand-in world
-    const startPhase = current?.phase || 'bet';
-    const battleSnapshot = startPhase === 'battle' ? current : null;
-    const battleSeed = startPhase === 'battle' ? current.seed : m.seed;
-    setupRound(lineups, battleSeed ?? null, traps, !current);
+    const startPhase = snapshot?.phase || 'prepare';
+    const battleSnapshot = startPhase === 'battle' ? snapshot : null;
+    const battleSeed = startPhase === 'battle' ? snapshot.seed : m.seed;
+    setupRound(lineups, battleSeed ?? null, traps, !snapshot);
     G.serverResult = null;
     if (startPhase === 'battle') {
-      for (const [id, ch] of Object.entries(current.publicChoices || {})) { const p = players.find((x) => x.id === id); if (p) p.choice = ch; }
-      if (me) me.choice = current.publicChoices?.[me.id] || null;
-      G.battleSeed = current.seed; G.battleSalt = current.salt; G.battleAt = performance.now() - (current.elapsedMs || 0);
-      reseedRound(current.seed);
-    } else if (startPhase === 'bet') {
+      for (const [id, ch] of Object.entries(snapshot.publicChoices || {})) { const p = players.find((x) => x.id === id); if (p) p.choice = ch; }
+      if (me) me.choice = snapshot.publicChoices?.[me.id] || null;
+      G.battleSeed = snapshot.seed; G.battleSalt = snapshot.salt; G.battleAt = performance.now() - (snapshot.elapsedMs || 0);
+      reseedRound(snapshot.seed);
+    } else {
       G.serverResult = null; G.battleAt = 0; G.battleSeed = null; G.battleSalt = null;
-      const elapsedMs = current ? Math.max(0, (current.elapsedMs || 0) + performance.now() - (G.currentAt || performance.now())) : 0;
-      const params = current ? { ...current, elapsedMs, at: performance.now() - elapsedMs, spectator: G.role === 'spectator', snapshot: true } : { betMs: m.betMs, secretMs: m.secretMs, at: m._at };
-      if (current) { params.ownChoice = current.ownChoice; params.secret = current.secret; params.publicChoices = current.publicChoices; }
+      const elapsedMs = startPhase === 'bet' && snapshot ? Math.max(0, (snapshot.elapsedMs || 0) + performance.now() - (G.currentAt || performance.now())) : 0;
+      const params = { ...(snapshot || {}), betMs: m.betMs, secretMs: m.secretMs, elapsedMs,
+        at: startPhase === 'bet' ? performance.now() - elapsedMs : 0, spectator: G.role === 'spectator', snapshot: !!snapshot, waitingStart: startPhase === 'prepare' };
+      if (snapshot) { params.ownChoice = snapshot.ownChoice; params.secret = snapshot.secret; params.publicChoices = snapshot.publicChoices; }
       const synced = await betPhase(r, rd, lineups, null, params);
       current = null;
       if (synced === 'sync') { current = G.current; G.current = null; continue; }
+      if (synced === 'closed') break;
     }
     if (Number.isInteger(G.battleSeed)) {
       // the seed and salt against the round's opening commitment

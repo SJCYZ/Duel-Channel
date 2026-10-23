@@ -537,7 +537,7 @@ async function stRoom(ctx) {
 
 // ---- 4 STARTING SOON -----------------------------------------------------------------------------------------------
 const currentElapsedMs = (current) => Math.max(0, (current?.elapsedMs || 0) + (G.currentAt ? performance.now() - G.currentAt : 0));
-const matchStateForSnapshot = (current) => ({ wait: 'wait', show: 'show', loading: 'loading', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[current?.phase] || 'show');
+const matchStateForSnapshot = (current) => ({ wait: 'wait', show: 'show', loading: 'loading', prepare: 'game', bet: 'game', battle: 'game', result: 'game', finish: 'finish' }[current?.phase] || 'show');
 function applyMatchSync(sync, scr, ctx) {
   const queued = NET.match?.drain('sync') || [];
   if (!sync && !queued.length) return null;
@@ -629,7 +629,7 @@ async function stLoading(ctx) {
     if (queuedSyncState) return queuedSyncState;
     NET.match.q.unshift(m);
   }
-  scr.text('panel_text/text_tip', '全部玩家已完成加载');
+  scr.text('panel_text/text_tip', '正在准备第一轮比赛');
   const tipState = await waitWithMatchSync(wait(Math.max(0, 0.5 - Math.max(0, elapsed / 1000 - 2.2))), scr);
   if (tipState) return tipState;
   await fadeOut(scr);
@@ -728,7 +728,7 @@ function topBar(scr, holder, r) {
   return top;
 }
 async function betPhase(r, rd, lineups, winner, net = null) {
-  phase(`第 ${r} 轮 · 押注（选择支持的队伍）`);
+  phase(net?.waitingStart ? `第 ${r} 轮 · 准备场地` : `第 ${r} 轮 · 押注（选择支持的队伍）`);
   const spectator = G.role === 'spectator';
   const stake = rd.roundScore, solo = !net && isSolo(), stand = standMode();
   const BET_TIME = net ? net.betMs / 1000 : solo ? (C.modeSoloOperationSelectTime || 300) : ((stand ? C.modeStandSelectTime : C.modeOperationSelectTime) || 20);
@@ -740,6 +740,7 @@ async function betPhase(r, rd, lineups, winner, net = null) {
     'panel_top_group/group_info_turn': false, 'group_bet_btn_turn': false, 'left_btn/btn_normal_bet': false, 'right_btn/btn_normal_bet': false,
     'group_turn/ui_particle_boom': false, 'group_turn/turn_info/img_sword': false, 'group_assess': false };
   for (const [k, v] of Object.entries(init)) scr.show(k, v);
+  if (net?.waitingStart) scr.text('panel_contdown_middle/text_time', '--:--');
   // the bet buttons' selection glow is a halo around a chevron-shaped hole; in btn_ex_bet the halo is not mirrored the
   // way btn_normal_bet's is (scale x −1.5), so its hole points away from the button and the arena shows through:
   // mirror it to match the button
@@ -778,7 +779,8 @@ async function betPhase(r, rd, lineups, winner, net = null) {
   for (const side of ['left_btn', 'right_btn']) scr.show(`group_bet_btn_turn/${side}/btn_normal_bet`, stand);
   // the official tips: 竞猜对决 gets those about its 观众保护 and the ones not about gifts; 礼物对决 all but those
   const tips = DCFG.tips.filter((x) => (stand ? !/礼物|赠|全投|观望/.test(x) : !/观众保护|竞猜对决/.test(x))), tip = tips[Math.floor(Math.random() * tips.length)];
-  scr.text('panel_contdown_middle/text_info', spectator ? '只读观战 · 选择支持的队伍' : out ? '你已被淘汰，正在观战……' : solo ? '选择后即开赛 · ' + tip : tip);
+  const hint = spectator ? '只读观战 · 选择支持的队伍' : out ? '你已被淘汰，正在观战……' : solo ? '选择后即开赛 · ' + tip : tip;
+  scr.text('panel_contdown_middle/text_info', net?.waitingStart ? '正在准备本轮，等待玩家加载完成' : hint);
   lineupRow(scr, 0, lineups[0]); lineupRow(scr, 1, lineups[1]);
   topBar(scr, 'manager_mode_view/top_menu_holder', r);
   scr.show('group_staff_info_left/panel_info', false); scr.show('group_staff_info_right/panel_info', false);
@@ -833,7 +835,7 @@ async function betPhase(r, rd, lineups, winner, net = null) {
     fillLists(scr, 'container', 'text_num');
   };
   const choose = (ch) => {
-    if (!me || spectator) return;
+    if (!me || spectator || (net?.waitingStart && !net.started)) return;
     if (stand) {
       if (me.out) return;
       me.choice = { side: ch.side };
@@ -880,6 +882,19 @@ async function betPhase(r, rd, lineups, winner, net = null) {
     if (list) list.alpha = 0;
   };
   if (net?.secret) goSecret();
+  if (net?.waitingStart) {
+    if (G.role !== 'spectator') NET.match.send({ t: 'round.ready', r });
+    let start;
+    do {
+      start = await NET.match.next(['round.start', 'sync']);
+      if (start.t === 'sync') { applyMatchSnapshot(start); scr.close(); return 'sync'; }
+      if (start.t === 'closed') { scr.close(); return 'closed'; }
+    } while (start.r !== r);
+    net.at = start._at; net.started = true;
+    scr.text('panel_contdown_middle/text_time', mmss(BET_TIME));
+    scr.text('panel_contdown_middle/text_info', hint);
+    phase(`第 ${r} 轮 · 押注（选择支持的队伍）`);
+  }
   let t = net ? (performance.now() - net.at) / 1000 : 0, red = false, lastTick = 0;
   const handle = scr.one('slidingarea/handle'), t0 = net && net.at ? net.at : performance.now();
   if (handle && net) handle.rt.amin[0] = handle.rt.amax[0] = clamp(t / BET_TIME, 0, 1);
