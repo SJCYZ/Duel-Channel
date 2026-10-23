@@ -468,7 +468,8 @@ async function stRoomOnline(ctx) {
   // out of another node's room: back to the page's own node for the queues and new rooms
   if (result === 'back' && WS_HOST !== location.host) { try { await moveLobby(location.host); } catch (e) { toast('与大厅的连接已断开', 3); } }
   scr.close();
-  return result === 'show' ? 'show' : joined ? 'entry' : 'prepare';
+  if (result && result !== 'back') return result;
+  return joined ? 'entry' : 'prepare';
 }
 
 async function chooseRoomRole(info) {
