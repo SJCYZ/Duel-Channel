@@ -1580,7 +1580,7 @@ function startBattle(resume = false) {
 function seekTo(elapsedMs) {
   const W = arena.W;
   if (!W) return;
-  const target = Math.max(0, elapsedMs / 1000);
+  const target = battleSimElapsed(elapsedMs / 1000);
   arena.running = false;
   arena.acc = 0;
   while (!W.done && W.t + 1e-9 < target) {
@@ -1871,6 +1871,17 @@ function playbackRate(t) {
     if (t < t1) { const [t0, r0] = PLAYBACK[i - 1]; return r0 + (r1 - r0) * (t - t0) / (t1 - t0); }
   }
   return PLAYBACK[PLAYBACK.length - 1][1];
+}
+function battleSimElapsed(wallElapsed) {
+  let wall = Math.max(0, wallElapsed), sim = 0;
+  for (let i = 1; i < PLAYBACK.length; i++) {
+    const [end, endRate] = PLAYBACK[i], [start, startRate] = PLAYBACK[i - 1];
+    const slope = (endRate - startRate) / (end - start);
+    const segmentWall = slope ? Math.log(endRate / startRate) / slope : (end - start) / startRate;
+    if (wall >= segmentWall) { wall -= segmentWall; sim = end; continue; }
+    return sim + (slope ? startRate * Math.expm1(slope * wall) / slope : startRate * wall);
+  }
+  return sim + wall * PLAYBACK[PLAYBACK.length - 1][1];
 }
 function arenaFrame(dt) {
   if (!arena) return;

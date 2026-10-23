@@ -281,7 +281,7 @@ function roomCodeFrom(value) {
   return /(?:^|\/)(\d{6})\/?$/.exec(url.pathname)?.[1] || null;
 }
 async function stEntry(ctx) {
-  const inviteCode = NET.on ? roomCodeFrom(location.href) : null;
+  let inviteCode = NET.on ? roomCodeFrom(location.href) : null;
   phase('入口 · 登录');
   const scr = new Screen('enemy_duel_entry_page', { z: 5 });
   scr.text('name_layout/text_name', me.name);
